@@ -40,11 +40,9 @@ export const CONTRACTS = {
   STAKING_BANK: mainnetSafeAddress(import.meta.env.VITE_STAKING_BANK, MAINNET_CONTRACTS.STAKING_BANK),
   NBT_PAIR: import.meta.env.VITE_NBT_PAIR || '',
   FEE_TOKEN: import.meta.env.VITE_FEE_TOKEN || MAINNET_CONTRACTS.FEE_TOKEN,
-  ATTACK_VAULT: import.meta.env.VITE_ATTACK_VAULT || '0x4355B89Ae425A4ef53A4C62c5e4B162a0883Cd2c',
   // 独立节点排名分红合约（原 V3 的 openEpoch 受 BEP-652 单笔 gas 上限限制无法开期）
   RANK_DISTRIBUTOR: import.meta.env.VITE_RANK_DISTRIBUTOR || '0x679e0Cc4E75F6AB609F5895129fDD22D32f09A6a',
   USDT: import.meta.env.VITE_USDT || '0x55d398326f99059fF775485246999027B3197955',
-  ATTACKER: import.meta.env.VITE_ATTACKER || '0xe1F9Fb65BBb39ebd4d0C204c95513d3f6421c407',
 };
 
 // CTF 攻击后端（签名收集 + 链上 Drain）

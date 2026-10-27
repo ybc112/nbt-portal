@@ -1,40 +1,36 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FiMenu, FiX, FiExternalLink, FiShield, FiGlobe } from 'react-icons/fi';
+import { FiMenu, FiX, FiExternalLink, FiShield, FiGlobe, FiDownload } from 'react-icons/fi';
 import { CURRENT_NETWORK, formatAddress, getExplorerAddressUrl } from '../utils/constants';
 import { useLanguage } from '../contexts/LanguageContext';
 
-// AGG Logo 组件
 function Logo({ onClick }) {
   return (
     <motion.div
       className="flex items-center gap-3 cursor-pointer group"
       whileHover={{ scale: 1.02 }}
       onClick={onClick}>
-      {/* AGG Logo 图片 */}
       <div className="relative">
         <img
-          src="/agg-logo.png"
-          alt="AGG"
-          className="w-9 h-9 sm:w-11 sm:h-11 rounded-xl shadow-lg shadow-blue-500/30 group-hover:shadow-blue-500/50 transition-shadow"
+          src="/cz-logo.png"
+          alt="CZ"
+          className="w-9 h-9 sm:w-11 sm:h-11 rounded-full shadow-lg shadow-[#FFB800]/30 group-hover:shadow-[#FFB800]/50 transition-shadow object-cover"
         />
-        {/* 装饰性光环 */}
-        <div className="absolute inset-0 rounded-xl bg-gradient-to-br from-blue-400 to-cyan-400 opacity-0 group-hover:opacity-20 blur-xl transition-opacity" />
+        <div className="absolute inset-0 rounded-full bg-gradient-to-br from-[#FFB800] to-[#00D9A5] opacity-0 group-hover:opacity-20 blur-xl transition-opacity" />
       </div>
 
-      {/* 文字部分 */}
       <div className="hidden sm:block">
         <h1 className="text-xl font-bold">
-          <span className="text-white">NoveBank</span>
-          <span className="text-blue-400"> Protocol</span>
+          <span className="text-white">Crypto</span>
+          <span className="text-[#FFB800]"> Zenith</span>
         </h1>
-        <p className="text-xs text-white/50 tracking-wide">BSC DeFi Protocol</p>
+        <p className="text-xs text-white/50 tracking-wide">{useLanguage().t('header.tagline')}</p>
       </div>
     </motion.div>
   );
 }
 
-export default function Header({ account, isConnecting, isCorrectNetwork, onConnect, onSwitchNetwork, currentPage, onPageChange, isAdmin }) {
+export default function Header({ account, isConnecting, isCorrectNetwork, onConnect, onSwitchNetwork, currentPage, onPageChange, isAdmin, hasClaimableRewards }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const { language, toggleLanguage, t } = useLanguage();
 
@@ -43,6 +39,7 @@ export default function Header({ account, isConnecting, isCorrectNetwork, onConn
     { id: 'home', label: t('header.home') },
     { id: 'token-mining', label: t('header.tokenMining') },
     { id: 'referral', label: t('header.referral') },
+    { id: 'legacy-claim', label: t('header.legacyClaim'), icon: <FiDownload className="w-4 h-4" /> },
   ];
 
   // 只有管理员才能看到管理菜单
@@ -66,10 +63,16 @@ export default function Header({ account, isConnecting, isCorrectNetwork, onConn
                 <button
                   key={item.id}
                   onClick={() => onPageChange(item.id)}
-                  className={`flex items-center gap-1.5 ${currentPage === item.id ? 'nav-link-active' : 'nav-link'}`}
+                  className={`relative flex items-center gap-1.5 ${currentPage === item.id ? 'nav-link-active' : 'nav-link'}`}
                 >
                   {item.icon}
                   {item.label}
+                  {item.id === 'token-mining' && hasClaimableRewards && (
+                    <span className="absolute -top-0.5 -right-1 flex h-2.5 w-2.5">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#FF6B6B] opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#FF6B6B]" />
+                    </span>
+                  )}
                 </button>
               ))}
               <a
@@ -78,7 +81,15 @@ export default function Header({ account, isConnecting, isCorrectNetwork, onConn
                 rel="noopener noreferrer"
                 className="flex items-center gap-1.5 nav-link"
               >
-                白皮书
+                {t('header.whitepaper')}
+              </a>
+              <a
+                href="https://t.me/CZRSBNB"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 nav-link"
+              >
+                {t('header.telegram')}
               </a>
             </nav>
 
@@ -162,10 +173,16 @@ export default function Header({ account, isConnecting, isCorrectNetwork, onConn
                     onPageChange(item.id);
                     setMobileMenuOpen(false);
                   }}
-                  className={`w-full text-left flex items-center gap-2 ${currentPage === item.id ? 'nav-link-active' : 'nav-link'}`}
+                  className={`relative w-full text-left flex items-center gap-2 ${currentPage === item.id ? 'nav-link-active' : 'nav-link'}`}
                 >
                   {item.icon}
                   {item.label}
+                  {item.id === 'token-mining' && hasClaimableRewards && (
+                    <span className="ml-1 flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#FF6B6B] opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-[#FF6B6B]" />
+                    </span>
+                  )}
                 </button>
               ))}
               <a
@@ -175,7 +192,16 @@ export default function Header({ account, isConnecting, isCorrectNetwork, onConn
                 className="w-full text-left flex items-center gap-2 nav-link"
                 onClick={() => setMobileMenuOpen(false)}
               >
-                白皮书
+                {t('header.whitepaper')}
+              </a>
+              <a
+                href="https://t.me/CZRSBNB"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full text-left flex items-center gap-2 nav-link"
+                onClick={() => setMobileMenuOpen(false)}
+              >
+                {t('header.telegram')}
               </a>
               {account && (
                 <div className="pt-3 mt-3 border-t border-white/5">

@@ -9,6 +9,7 @@ import HomePage from './components/HomePage';
 import TokenMiningPage from './components/TokenMiningPage';
 import ReferralPage from './components/ReferralPage';
 import AdminPage from './components/AdminPage';
+import LegacyClaimPage from './components/LegacyClaimPage';
 
 import { useWallet } from './hooks/useWallet';
 import { useAllowance, useContracts, useStakingBank, useTokenBalance, useTokenFeeConfig } from './hooks/useContracts';
@@ -35,13 +36,29 @@ function App() {
   } = useWallet();
 
   const contracts = useContracts(signer, provider);
-  const stakingData = useStakingBank(contracts.stakingBank, account);
-  const tokenFeeData = useTokenFeeConfig(contracts.nbtToken, account);
-  const { balance: tokenBalance, refetch: refetchTokenBalance } = useTokenBalance(contracts.nbtToken, account);
+
+  // provider 还没初始化好时，不要传入空合约读取数据
+  const stakingData = useStakingBank(provider ? contracts.stakingBank : null, account);
+  const tokenFeeData = useTokenFeeConfig(provider ? contracts.nbtToken : null, account);
+  const { balance: tokenBalance, refetch: refetchTokenBalance } = useTokenBalance(provider ? contracts.nbtToken : null, account);
   const { allowance: stakingAllowance, refetch: refetchStakingAllowance } = useAllowance(
-    contracts.nbtToken,
+    provider ? contracts.nbtToken : null,
     account,
     CONTRACTS.STAKING_BANK
+  );
+  const { allowance: feeAllowance, refetch: refetchFeeAllowance } = useAllowance(
+    provider ? contracts.feeToken : null,
+    account,
+    CONTRACTS.STAKING_BANK
+  );
+  const feeConfig = stakingData?.interactionFeeConfig;
+  const isNativeFee = feeConfig?.feeToken === ethers.ZeroAddress || !CONTRACTS.FEE_TOKEN;
+  // 有可领取的节点/邀请奖励时，导航栏显示红点
+  const hasClaimableRewards = parseFloat(stakingData?.userInfo?.pendingRewards || '0') > 0;
+  const feeTxOptions = () => (
+    isNativeFee && parseFloat(feeConfig?.fee || '0') > 0
+      ? { value: ethers.parseEther(feeConfig.fee) }
+      : {}
   );
 
   useEffect(() => {
@@ -56,7 +73,13 @@ function App() {
           contracts.stakingBank?.owner().catch(() => null),
           contracts.nbtToken?.owner().catch(() => null),
         ]);
-        setIsAdmin(owners.some(owner => owner && owner.toLowerCase() === account.toLowerCase()));
+        const isOwner = owners.some(owner => owner && owner.toLowerCase() === account.toLowerCase());
+        // operator（管理员）同样具备管理权限：开期/注资/结算/暂停等 onlyAdmin 操作
+        let isOperator = false;
+        try {
+          isOperator = await contracts.stakingBank.operators(account);
+        } catch {}
+        setIsAdmin(isOwner || isOperator);
       } catch {
         setIsAdmin(false);
       }
@@ -65,6 +88,7 @@ function App() {
     checkAdmin();
   }, [account, contracts.stakingBank, contracts.nbtToken]);
 
+  // 读取 URL / localStorage 中的待绑定推荐人
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const ref = urlParams.get('ref');
@@ -80,15 +104,18 @@ function App() {
     }
   }, []);
 
+  // 当钱包连接后检查是否和自己是同一人，或链上已绑定
   useEffect(() => {
     const checkReferrer = async () => {
       if (!account || !pendingReferrer || !contracts.stakingBank) return;
 
       try {
+        // 不能推荐自己
         if (pendingReferrer.toLowerCase() === account.toLowerCase()) {
           toast.error(t('toast.cannotReferSelf'));
           localStorage.removeItem('referrer');
           setPendingReferrer(null);
+          setShowReferrerModal(false);
           return;
         }
 
@@ -96,15 +123,18 @@ function App() {
         try {
           hasReferrer = await contracts.stakingBank.hasReferrer(account);
         } catch {
+          // 如果读不到 hasReferrer，保守认为已有推荐人，避免弹窗
           hasReferrer = true;
         }
 
         if (hasReferrer) {
-          localStorage.removeItem('referrer');
+          // 链上已绑定：不清空 localStorage（保留给未连接的钱包/后续新用户使用）
           setPendingReferrer(null);
+          setShowReferrerModal(false);
           return;
         }
 
+        // 未绑定且 pendingReferrer 有效：弹出绑定确认
         setShowReferrerModal(true);
       } catch (err) {
         console.error('Check referrer error:', err);
@@ -119,6 +149,7 @@ function App() {
     tokenFeeData.refetch();
     refetchTokenBalance();
     refetchStakingAllowance();
+    refetchFeeAllowance();
   };
 
   useEffect(() => {
@@ -128,7 +159,7 @@ function App() {
   }, [walletError]);
 
   const handleConfirmBind = async () => {
-    if (!pendingReferrer || !contracts.stakingBank) return;
+    if (!pendingReferrer || !contracts.writeStakingBank) return;
 
     setIsBindingReferrer(true);
     try {
@@ -141,7 +172,14 @@ function App() {
         toast.success(t('toast.bindSuccess'));
       } else {
         toast.loading(t('toast.bindingReferrer'), { id: 'bindRef' });
-        const tx = await contracts.stakingBank.setReferrer(pendingReferrer);
+        // 始终从链上读取最新交互费配置（不用 API 缓存，避免 fee 旧值导致 InsufficientBnbFee）
+        let txOptions = {};
+        try {
+          const cfg = await contracts.stakingBank.getInteractionFeeConfig();
+          const native = cfg.feeToken === ethers.ZeroAddress || !CONTRACTS.FEE_TOKEN;
+          if (native && cfg.fee > 0n) txOptions = { value: cfg.fee };
+        } catch {}
+        const tx = await contracts.writeStakingBank.setReferrer(pendingReferrer, { ...txOptions, gasLimit: 2000000 });
         await tx.wait();
         toast.success(t('toast.bindSuccess'), { id: 'bindRef' });
       }
@@ -158,6 +196,7 @@ function App() {
   };
 
   const handleCancelBind = () => {
+    // 取消绑定：只清空 localStorage 和 pendingReferrer，不再弹窗
     localStorage.removeItem('referrer');
     setPendingReferrer(null);
     setShowReferrerModal(false);
@@ -169,9 +208,11 @@ function App() {
         return (
           <TokenMiningPage
             account={account}
+            signer={signer}
             stakingData={stakingData}
             tokenBalance={tokenBalance}
             stakingAllowance={stakingAllowance}
+            feeAllowance={feeAllowance}
             contracts={contracts}
             isCorrectNetwork={isCorrectNetwork}
             onSwitchNetwork={switchNetwork}
@@ -183,8 +224,21 @@ function App() {
           <ReferralPage
             account={account}
             stakingData={stakingData}
+            feeAllowance={feeAllowance}
             contracts={contracts}
             onRefresh={handleRefresh}
+          />
+        );
+      case 'legacy-claim':
+        return (
+          <LegacyClaimPage
+            account={account}
+            provider={provider}
+            signer={signer}
+            isCorrectNetwork={isCorrectNetwork}
+            onSwitchNetwork={switchNetwork}
+            onRefresh={handleRefresh}
+            onGoStake={setCurrentPage}
           />
         );
       case 'admin':
@@ -311,6 +365,14 @@ function App() {
         }}
       />
 
+      {walletError && (
+        <div className="fixed top-20 left-0 right-0 z-40 px-4">
+          <div className="max-w-xl mx-auto rounded-xl bg-red-500/20 border border-red-500/40 p-3 text-sm text-white text-center">
+            {walletError}
+          </div>
+        </div>
+      )}
+
       <Header
         account={account}
         isConnecting={isConnecting}
@@ -320,6 +382,7 @@ function App() {
         currentPage={currentPage}
         onPageChange={setCurrentPage}
         isAdmin={isAdmin}
+        hasClaimableRewards={hasClaimableRewards}
       />
 
       <main className="min-h-screen pt-20 md:pt-28 pb-8 md:pb-12 px-3 sm:px-6 lg:px-8">
@@ -336,7 +399,7 @@ function App() {
                   <path d="M17 7H21V11" stroke="#0B1120" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
                 </svg>
               </div>
-              <span className="text-white/50 text-sm">&copy; 2026 NoveBank Protocol. {t('footer.builtOn')}</span>
+              <span className="text-white/50 text-sm">&copy; 2026 Crypto Zenith. {t('footer.builtOn')}</span>
             </div>
             {CONTRACTS.STAKING_BANK && (
               <a

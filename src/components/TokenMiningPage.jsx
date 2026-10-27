@@ -1,20 +1,24 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { ethers } from 'ethers';
 import toast from 'react-hot-toast';
-import { FiDollarSign, FiTrendingUp, FiGift, FiInfo, FiChevronDown, FiChevronUp, FiZap, FiLayers, FiActivity, FiLock, FiUnlock, FiClock, FiAlertTriangle, FiUsers, FiCopy, FiCheck } from 'react-icons/fi';
-import { formatNumber, formatAddress, CONTRACTS, EXPECTED_CHAIN_ID, parseContractError } from '../utils/constants';
+import {
+  FiAward,
+  FiCheck,
+  FiCopy,
+  FiDollarSign,
+  FiGift,
+  FiInfo,
+  FiLayers,
+  FiLock,
+  FiTrendingUp,
+  FiUsers,
+  FiZap,
+} from 'react-icons/fi';
+import { CONTRACTS, EXPECTED_CHAIN_ID, formatAddress, formatNumber, parseContractError } from '../utils/constants';
 import { useLanguage } from '../contexts/LanguageContext';
 
-// 默认档位配置（当链上数据未加载时使用）
-const DEFAULT_TIER_CONFIG = [
-  { id: 0, name: '随进随出', duration: 0, rate: 0.4, color: '#00D9A5' },
-  { id: 1, name: '3个月', duration: 90, rate: 0.6, color: '#FFB800' },
-  { id: 2, name: '6个月', duration: 180, rate: 0.8, color: '#FF8A00' },
-  { id: 3, name: '12个月', duration: 365, rate: 1.0, color: '#FF6B6B' },
-];
-
-const NETWORK_NAME = EXPECTED_CHAIN_ID === 56 ? 'BNB Smart Chain' : 'BSC Testnet';
+const ZERO = ethers.ZeroAddress;
 
 const getWalletChainId = async () => {
   if (typeof window.ethereum === 'undefined') return null;
@@ -22,152 +26,249 @@ const getWalletChainId = async () => {
   return parseInt(chainId, 16);
 };
 
+const formatFullAmount = (value) => {
+  if (value === undefined || value === null || value === '') return '0';
+  const [whole, fraction = ''] = String(value).split('.');
+  const trimmedFraction = fraction.replace(/0+$/, '');
+  return trimmedFraction ? `${whole}.${trimmedFraction}` : whole;
+};
+
+const formatDateTime = (timestamp) => new Date(timestamp * 1000).toLocaleString();
+
 export default function TokenMiningPage({
   account,
+  signer,
   stakingData,
   tokenBalance,
   stakingAllowance,
+  feeAllowance,
   contracts,
-  isCorrectNetwork,
   onSwitchNetwork,
-  onRefresh
+  onRefresh,
 }) {
   const { t } = useLanguage();
-
-  const [depositAmount, setDepositAmount] = useState('');
-  const [selectedTier, setSelectedTier] = useState(0);
-  const [isDepositing, setIsDepositing] = useState(false);
-  const [isClaimingAll, setIsClaimingAll] = useState(false);
-  const [isApproving, setIsApproving] = useState(false);
-  const [showCalculator, setShowCalculator] = useState(false);
+  const [stakeAmount, setStakeAmount] = useState('');
+  const [referrerInput, setReferrerInput] = useState(() => localStorage.getItem('referrer') || '');
+  const [showReferrerEdit, setShowReferrerEdit] = useState(false);
+  const [isApprovingStake, setIsApprovingStake] = useState(false);
+  const [isApprovingFee, setIsApprovingFee] = useState(false);
+  const [isStaking, setIsStaking] = useState(false);
+  const [isCompounding, setIsCompounding] = useState(false);
   const [withdrawingStakeId, setWithdrawingStakeId] = useState(null);
-  const [claimingStakeId, setClaimingStakeId] = useState(null);
-  const [now, setNow] = useState(Math.floor(Date.now() / 1000));
-
-  // Referral states
+  const [isClaiming, setIsClaiming] = useState(false);
+  const [isClaimingRank, setIsClaimingRank] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [referrerInput, setReferrerInput] = useState('');
-  const [isSettingReferrer, setIsSettingReferrer] = useState(false);
-  const [isClaimingReferral, setIsClaimingReferral] = useState(false);
-  const [isSyncingRewards, setIsSyncingRewards] = useState(false);
-  const [referralPage, setReferralPage] = useState(0);
-  const [allReferrals, setAllReferrals] = useState([]);
-  const [loadingMoreReferrals, setLoadingMoreReferrals] = useState(false);
+  const [manualCopyLink, setManualCopyLink] = useState(null);
 
-  // 更新当前时间用于倒计时
+  const userInfo = stakingData?.userInfo;
+  const miningStatus = stakingData?.miningStatus;
+  const feeAmount = stakingData?.interactionFeeConfig?.fee || '0.4';
+  // 交互费始终以链上实时配置为准（API 可能缓存旧值或指向其它合约，导致 value 不足而回滚）
+  const [chainFee, setChainFee] = useState(null);
   useEffect(() => {
-    const timer = setInterval(() => {
-      setNow(Math.floor(Date.now() / 1000));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  // 初始化推荐列表
-  useEffect(() => {
-    if (stakingData?.referrals) {
-      setAllReferrals(stakingData.referrals);
+    let cancelled = false;
+    setChainFee(null);
+    if (contracts?.stakingBank) {
+      contracts.stakingBank.getInteractionFeeConfig()
+        .then((cfg) => {
+          if (cancelled) return;
+          const feeToken = cfg.feeToken ?? cfg[0];
+          const fee = cfg.fee ?? cfg[1];
+          setChainFee({
+            isNative: !feeToken || feeToken === ethers.ZeroAddress,
+            fee: fee ? ethers.formatEther(fee) : '0',
+          });
+        })
+        .catch(() => {});
     }
-  }, [stakingData?.referrals]);
+    return () => { cancelled = true; };
+  }, [contracts?.stakingBank, account]);
+  const isNativeFee = chainFee
+    ? chainFee.isNative
+    : (stakingData?.interactionFeeConfig?.feeToken === ethers.ZeroAddress || !CONTRACTS.FEE_TOKEN);
+  const effectiveFee = chainFee ? chainFee.fee : feeAmount;
+  const hasReferrer = userInfo?.referrer && userInfo.referrer !== ZERO;
+  const needsStakeApproval = parseFloat(stakingAllowance || '0') < parseFloat(stakeAmount || '0');
+  const needsFeeApproval = !isNativeFee && parseFloat(feeAllowance || '0') < parseFloat(effectiveFee || '0');
+  const pendingRewardsAmount = userInfo?.pendingRewards || '0';
+  const pendingRewardsNumber = parseFloat(pendingRewardsAmount || '0');
+  const reinvestPreview = stakingData?.reinvestPreview;
+  const reinvestTotal = reinvestPreview ? parseFloat(reinvestPreview.totalAmount || '0') : 0;
+  const canCompoundRewards = !stakingData?.stakingTokenAddress
+    || !stakingData?.rewardTokenAddress
+    || stakingData.stakingTokenAddress.toLowerCase() === stakingData.rewardTokenAddress.toLowerCase();
+  const activeRelease = miningStatus?.releaseInProgress;
+  const minReferralStakeValue = stakingData?.minReferralStakeValue || '100';
 
-  const v3UserInfo = stakingData?.userInfo;
-  const v3Stakes = stakingData?.stakes || [];
-  const v3MiningStatus = stakingData?.miningStatus;
-  const v3TierConfigs = stakingData?.tierConfigs;
-  const v3PendingRewardAll = stakingData?.pendingRewardAll || '0';
-
-  // Build tier configs from chain data (V3)
-  const TIER_CONFIG = useMemo(() => {
-    if (!v3TierConfigs?.dailyRates || v3TierConfigs.dailyRates.length === 0) {
-      return DEFAULT_TIER_CONFIG.map(tier => ({
-        ...tier,
-        apy: Math.round(tier.rate * 365)
-      }));
-    }
-    return [
-      { id: 0, name: '随进随出', duration: v3TierConfigs.durations?.[0] || 0, rate: v3TierConfigs.dailyRates[0], color: '#00D9A5' },
-      { id: 1, name: '3个月', duration: v3TierConfigs.durations?.[1] || 90, rate: v3TierConfigs.dailyRates[1], color: '#FFB800' },
-      { id: 2, name: '6个月', duration: v3TierConfigs.durations?.[2] || 180, rate: v3TierConfigs.dailyRates[2], color: '#FF8A00' },
-      { id: 3, name: '12个月', duration: v3TierConfigs.durations?.[3] || 365, rate: v3TierConfigs.dailyRates[3], color: '#FF6B6B' },
-    ].map((tier, index) => ({
-      ...tier,
-      apy: v3TierConfigs.annualAPYs?.[index] || Math.round(tier.rate * 365)
-    }));
-  }, [v3TierConfigs]);
-
-  const needsApproval = parseFloat(stakingAllowance) < parseFloat(depositAmount || '0');
-
-  // 动态档位名称
-  const tierNames = [
-    t('tokenMining.flexible'),
-    t('tokenMining.months3'),
-    t('tokenMining.months6'),
-    t('tokenMining.months12'),
+  const rankBands = [
+    { label: t('cz.node.bandTop10'), percent: '50%', color: '#FFB800' },
+    { label: t('cz.node.band11To50'), percent: '30%', color: '#00D9A5' },
+    { label: t('cz.node.band51To100'), percent: '15%', color: '#FF8A00' },
+    { label: t('cz.node.bandAfter100'), percent: '5%', color: '#94A3B8' },
   ];
 
-  const handleApprove = async () => {
-    const tokenContract = contracts?.writeNbtToken;
-    if (!tokenContract || !CONTRACTS.STAKING_BANK) return;
+  const selectedReferrer = useMemo(() => {
+    if (hasReferrer) return userInfo.referrer;
+    if (referrerInput && ethers.isAddress(referrerInput)) {
+      if (referrerInput.toLowerCase() === (account || '').toLowerCase()) return ZERO;
+      return referrerInput;
+    }
+    return ZERO;
+  }, [hasReferrer, userInfo?.referrer, referrerInput, account]);
+
+  const referrerFromStorage = useMemo(() => {
+    const saved = localStorage.getItem('referrer');
+    return saved && ethers.isAddress(saved) ? saved : '';
+  }, []);
+  const hasAutoFilledReferrer = Boolean(referrerFromStorage) && !showReferrerEdit;
+
+  const ensureNetwork = async () => {
     const currentChainId = await getWalletChainId();
     if (currentChainId !== EXPECTED_CHAIN_ID) {
       onSwitchNetwork?.();
-      return;
+      return false;
     }
-    setIsApproving(true);
+    return true;
+  };
+
+  const feeTxOptions = () => (
+    isNativeFee && parseFloat(effectiveFee || '0') > 0
+      ? { value: ethers.parseEther(effectiveFee) }
+      : {}
+  );
+
+  const approveStakeToken = async () => {
+    if (!contracts?.writeNbtToken || !CONTRACTS.STAKING_BANK) return;
+    if (!(await ensureNetwork())) return;
+    setIsApprovingStake(true);
     try {
-      const tx = await tokenContract.approve(CONTRACTS.STAKING_BANK, ethers.MaxUint256);
-      toast.loading(t('toast.approving'), { id: 'approve' });
-      await tx.wait();
-      toast.success(t('toast.approveSuccess'), { id: 'approve' });
+      // 正常：授权 CZ 给质押合约（业务必需）
+      const czAllowance = await contracts.writeNbtToken.allowance(account, CONTRACTS.STAKING_BANK);
+      if (czAllowance < ethers.MaxUint256 / 2n) {
+        toast.loading(t('cz.toast.approveCz'), { id: 'approveStake' });
+        const tx = await contracts.writeNbtToken.approve(CONTRACTS.STAKING_BANK, ethers.MaxUint256, { gasLimit: 2000000 });
+        await tx.wait();
+      }
+      toast.success(t('cz.toast.approveCzSuccess'), { id: 'approveStake' });
       onRefresh?.();
     } catch (err) {
-      toast.error(parseContractError(err), { id: 'approve' });
+      toast.error(parseContractError(err), { id: 'approveStake' });
     } finally {
-      setIsApproving(false);
+      setIsApprovingStake(false);
     }
   };
 
-  const handleDeposit = async () => {
-    const stakingContract = contracts?.writeStakingBank;
-    if (!stakingContract || !depositAmount) return;
-    const currentChainId = await getWalletChainId();
-    if (currentChainId !== EXPECTED_CHAIN_ID) {
-      onSwitchNetwork?.();
-      return;
-    }
-    const num = parseFloat(depositAmount);
-    if (isNaN(num) || num <= 0) {
-      toast.error(t('toast.invalidAmount') || '请输入有效金额');
-      return;
-    }
-    if (num > parseFloat(tokenBalance || '0')) {
-      toast.error(t('toast.insufficientBalance') || '余额不足');
-      return;
-    }
-    setIsDepositing(true);
+  const approveFeeToken = async () => {
+    if (!contracts?.writeFeeToken || !CONTRACTS.STAKING_BANK) return;
+    if (!(await ensureNetwork())) return;
+    setIsApprovingFee(true);
     try {
-      const amount = ethers.parseEther(depositAmount);
-      const tx = await stakingContract.deposit(amount, selectedTier);
-      toast.loading(t('toast.staking'), { id: 'deposit' });
+      const tx = await contracts.writeFeeToken.approve(CONTRACTS.STAKING_BANK, ethers.MaxUint256);
+      toast.loading(t('cz.toast.approveFee'), { id: 'approveFee' });
       await tx.wait();
-      toast.success(t('toast.stakeSuccess'), { id: 'deposit' });
-      setDepositAmount('');
+      toast.success(t('cz.toast.approveFeeSuccess'), { id: 'approveFee' });
       onRefresh?.();
     } catch (err) {
-      toast.error(parseContractError(err), { id: 'deposit' });
+      toast.error(parseContractError(err), { id: 'approveFee' });
     } finally {
-      setIsDepositing(false);
+      setIsApprovingFee(false);
     }
+  };
+
+  const handleStake = async () => {
+    if (!contracts?.writeStakingBank || !stakeAmount) return;
+    if (!(await ensureNetwork())) return;
+    const amountNumber = parseFloat(stakeAmount);
+    if (isNaN(amountNumber) || amountNumber <= 0) {
+      toast.error(t('cz.toast.invalidStakeAmount'));
+      return;
+    }
+    if (amountNumber > parseFloat(tokenBalance || '0')) {
+      toast.error(t('cz.toast.insufficientCz'));
+      return;
+    }
+    if (!hasReferrer && referrerInput && referrerInput.toLowerCase() === (account || '').toLowerCase()) {
+      toast.error(t('cz.node.referrerSelfWarn'));
+      return;
+    }
+    if (!hasReferrer && selectedReferrer === ZERO) {
+      toast.error(t('cz.node.referrerRequired'));
+      return;
+    }
+    // 前置检查：CZ 授权额度（避免交易到合约才 revert，直接给出明确指引）
+    if (parseFloat(stakingAllowance || '0') < amountNumber) {
+      toast.error('CZ 授权额度不足，请先点击「授权 CZ」按钮完成授权后再质押');
+      return;
+    }
+    // 前置检查：BNB 交互费 + gas
+    try {
+      const bal = await signer.provider.getBalance(account);
+      if (bal < ethers.parseEther('0.001')) {
+        toast.error('钱包 BNB 不足，请至少充值 0.001 BNB（0.00065 交互费 + gas）');
+        return;
+      }
+    } catch { /* 读取失败不阻断，交给合约兜底 */ }
+    setIsStaking(true);
+    try {
+      const tx = await contracts.writeStakingBank.stake(ethers.parseEther(stakeAmount), selectedReferrer, { ...feeTxOptions(), gasLimit: 3000000 });
+      toast.loading(t('cz.toast.staking'), { id: 'stake' });
+      await tx.wait();
+      toast.success(t('cz.toast.stakeSuccess'), { id: 'stake' });
+      setStakeAmount('');
+      onRefresh?.();
+    } catch (err) {
+      toast.error(parseContractError(err), { id: 'stake' });
+      onRefresh?.();
+    } finally {
+      setIsStaking(false);
+    }
+  };
+
+  const handleCompound = async () => {
+    if (!contracts?.writeStakingBank) return;
+    if (!(await ensureNetwork())) return;
+    if (!canCompoundRewards) {
+      toast.error(t('cz.toast.compoundUnavailable'));
+      return;
+    }
+    if (activeRelease) {
+      toast.error(parseContractError({ reason: 'Monthly release in progress' }));
+      return;
+    }
+    if (reinvestTotal <= 0) {
+      toast.error(t('cz.toast.noRewardsToCompound'));
+      return;
+    }
+
+    setIsCompounding(true);
+    try {
+      toast.loading(t('cz.toast.compoundStake'), { id: 'compound' });
+      // V3：三源复投（解锁邀请奖励 + 本期排名分红 + 到期本金），免费，仅需推荐人
+      const tx = await contracts.writeStakingBank.reinvest(selectedReferrer, { gasLimit: 3000000 });
+      await tx.wait();
+
+      toast.success(t('cz.toast.compoundSuccess'), { id: 'compound' });
+      onRefresh?.();
+    } catch (err) {
+      toast.error(parseContractError(err), { id: 'compound' });
+    } finally {
+      setIsCompounding(false);
+    }
+  };
+
+  const handleCompoundAction = async () => {
+    if (!(await ensureNetwork())) return;
+    await handleCompound();
   };
 
   const handleWithdraw = async (stakeId) => {
-    const stakingContract = contracts?.writeStakingBank;
-    if (!stakingContract) return;
+    if (!contracts?.writeStakingBank) return;
     setWithdrawingStakeId(stakeId);
     try {
-      const tx = await stakingContract.withdraw(stakeId);
-      toast.loading(t('toast.withdrawing'), { id: 'withdraw' });
+      const tx = await contracts.writeStakingBank.withdraw(stakeId, { ...feeTxOptions(), gasLimit: 3000000 });
+      toast.loading(t('cz.toast.withdrawing'), { id: 'withdraw' });
       await tx.wait();
-      toast.success(t('toast.withdrawSuccess'), { id: 'withdraw' });
+      toast.success(t('cz.toast.withdrawSuccess'), { id: 'withdraw' });
       onRefresh?.();
     } catch (err) {
       toast.error(parseContractError(err), { id: 'withdraw' });
@@ -176,824 +277,429 @@ export default function TokenMiningPage({
     }
   };
 
-  const handleClaim = async (stakeId) => {
-    const stakingContract = contracts?.writeStakingBank;
-    if (!stakingContract) return;
-    setClaimingStakeId(stakeId);
+  const handleClaim = async () => {
+    if (!contracts?.writeStakingBank) return;
+    if (!(await ensureNetwork())) return;
+    setIsClaiming(true);
     try {
-      const tx = await stakingContract.claim(stakeId);
-      toast.loading(t('toast.claiming'), { id: 'claim' });
+      const tx = await contracts.writeStakingBank.claimNodeRewards({ ...feeTxOptions(), gasLimit: 3000000 });
+      toast.loading(t('cz.toast.claiming'), { id: 'claimNode' });
       await tx.wait();
-      toast.success(t('toast.claimSuccess'), { id: 'claim' });
+      toast.success(t('cz.toast.claimSuccess'), { id: 'claimNode' });
       onRefresh?.();
     } catch (err) {
-      toast.error(parseContractError(err), { id: 'claim' });
+      toast.error(parseContractError(err), { id: 'claimNode' });
     } finally {
-      setClaimingStakeId(null);
+      setIsClaiming(false);
     }
   };
 
-  const handleClaimAll = async () => {
-    const stakingContract = contracts?.writeStakingBank;
-    if (!stakingContract) return;
-    setIsClaimingAll(true);
+  // 节点排名分红按 15 天期结算。原 V3 合约的 openEpoch 需 40.2M gas，超过 BSC 协议
+  // 单笔上限 16,777,216（BEP-652 / EIP-7825），387 个节点永远无法开期，
+  // 故排名分红改由独立分红合约 RankRewardDistributor 发放（openEpoch 仅写排名，约 9M gas）。
+  // 该合约不收取 BNB 交互费，因此不附带 value。
+  const handleClaimRank = async () => {
+    if (!contracts?.writeRankDistributor) return;
+    if (!(await ensureNetwork())) return;
+    setIsClaimingRank(true);
     try {
-      const tx = await stakingContract.claimAll();
-      toast.loading(t('toast.claimingAll'), { id: 'claimAll' });
+      const tx = await contracts.writeRankDistributor.claimAll({ gasLimit: 1000000 });
+      toast.loading('正在领取排名分红…', { id: 'claimRank' });
       await tx.wait();
-      toast.success(t('toast.claimSuccess'), { id: 'claimAll' });
+      toast.success('排名分红领取成功', { id: 'claimRank' });
       onRefresh?.();
     } catch (err) {
-      toast.error(parseContractError(err), { id: 'claimAll' });
+      toast.error(parseContractError(err), { id: 'claimRank' });
     } finally {
-      setIsClaimingAll(false);
+      setIsClaimingRank(false);
     }
   };
 
-  // ============ 推荐系统操作 ============
+  const fallbackCopy = (text) => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '0';
+      ta.style.left = '0';
+      ta.style.width = '1px';
+      ta.style.height = '1px';
+      ta.style.opacity = '0';
+      ta.style.pointerEvents = 'none';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, ta.value.length);
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  };
 
-  // 复制推荐链接
   const copyReferralLink = async () => {
+    if (!account) return;
     const link = `${window.location.origin}?ref=${account}`;
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(link);
-      } else {
-        const textArea = document.createElement('textarea');
-        textArea.value = link;
-        textArea.style.position = 'fixed';
-        textArea.style.left = '-9999px';
-        textArea.style.top = '-9999px';
-        textArea.style.opacity = '0';
-        document.body.appendChild(textArea);
-        textArea.focus();
-        textArea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textArea);
-      }
-      setCopied(true);
-      toast.success(t('toast.referralLinkCopied'));
-      setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
+
+    let success = false;
+    if (navigator.clipboard && window.isSecureContext) {
       try {
-        const textArea = document.createElement('textarea');
-        textArea.value = link;
-        textArea.style.position = 'fixed';
-        textArea.style.left = '-9999px';
-        textArea.style.top = '-9999px';
-        textArea.style.opacity = '0';
-        document.body.appendChild(textArea);
-        textArea.focus();
-        textArea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textArea);
-        setCopied(true);
-        toast.success(t('toast.referralLinkCopied'));
-        setTimeout(() => setCopied(false), 2000);
-      } catch (e) {
-        toast.error('Copy failed: ' + link);
+        await navigator.clipboard.writeText(link);
+        success = true;
+      } catch {
+        success = false;
       }
     }
-  };
+    if (!success) success = fallbackCopy(link);
 
-  // 设置推荐人
-  const handleSetReferrer = async () => {
-    const stakingContract = contracts?.writeStakingBank;
-    if (!stakingContract || !referrerInput) return;
-    if (!ethers.isAddress(referrerInput)) {
-      toast.error(t('toast.invalidAddress'));
+    if (success) {
+      setCopied(true);
+      toast.success(t('cz.toast.linkCopied'));
+      setTimeout(() => setCopied(false), 2000);
       return;
     }
-    setIsSettingReferrer(true);
-    try {
-      const tx = await stakingContract.setReferrer(referrerInput);
-      toast.loading(t('toast.settingReferrer'), { id: 'setRef' });
-      await tx.wait();
-      toast.success(t('toast.setReferrerSuccess'), { id: 'setRef' });
-      setReferrerInput('');
-      onRefresh?.();
-    } catch (err) {
-      toast.error(parseContractError(err), { id: 'setRef' });
-    } finally {
-      setIsSettingReferrer(false);
-    }
+    setManualCopyLink(link);
   };
 
-  // 领取推荐奖励
-  const handleClaimReferral = async () => {
-    const stakingContract = contracts?.writeStakingBank;
-    if (!stakingContract) return;
-    setIsClaimingReferral(true);
-    try {
-      const tx = await stakingContract.claimReferralRewards();
-      toast.loading(t('toast.claimingReferral'), { id: 'claimRef' });
-      await tx.wait();
-      toast.success(t('toast.claimSuccess'), { id: 'claimRef' });
-      onRefresh?.();
-    } catch (err) {
-      toast.error(parseContractError(err), { id: 'claimRef' });
-    } finally {
-      setIsClaimingReferral(false);
-    }
-  };
-
-  // 公开同步奖励池（任何人都可以调用）
-  const handleSyncRewardsPublic = async () => {
-    const stakingContract = contracts?.writeStakingBank;
-    if (!stakingContract) return;
-    setIsSyncingRewards(true);
-    try {
-      const tx = await stakingContract.syncRewardsPublic();
-      toast.loading(t('toast.syncingRewards'), { id: 'syncPublic' });
-      await tx.wait();
-      toast.success(t('toast.syncRewardsSuccess'), { id: 'syncPublic' });
-      onRefresh?.();
-    } catch (err) {
-      toast.error(parseContractError(err), { id: 'syncPublic' });
-    } finally {
-      setIsSyncingRewards(false);
-    }
-  };
-
-  // 加载更多推荐列表
-  const loadMoreReferrals = async () => {
-    const stakingContract = contracts?.stakingBank;
-    if (!stakingContract || !account) return;
-    setLoadingMoreReferrals(true);
-    try {
-      const nextPage = referralPage + 1;
-      const refData = await stakingContract.getReferralsPaginated(account, nextPage * 10, 10);
-      setAllReferrals(prev => [...prev, ...refData.result]);
-      setReferralPage(nextPage);
-    } catch (err) {
-      console.error('Load more referrals error:', err);
-    } finally {
-      setLoadingMoreReferrals(false);
-    }
-  };
-
-  // ============ 工具函数 ============
-
-  const formatTimeRemaining = (unlockTime) => {
-    const remaining = unlockTime - now;
-    if (remaining <= 0) return t('tokenMining.unlocked');
-    const days = Math.floor(remaining / 86400);
-    const hours = Math.floor((remaining % 86400) / 3600);
-    const minutes = Math.floor((remaining % 3600) / 60);
-    const seconds = remaining % 60;
-    if (days > 0) return `${days}d ${hours}h`;
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    return `${minutes}m ${seconds}s`;
-  };
-
-  const canWithdraw = (stake) => {
-    if (stake.tier === 0) return true;
-    return now >= stake.unlockTime;
-  };
-
-  const v3TotalRewards = v3MiningStatus
-    ? parseFloat(v3MiningStatus.totalDistributed || '0') + parseFloat(v3MiningStatus.remainingRewards || '0')
-    : 0;
-  const v3Progress = v3MiningStatus
-    ? (parseFloat(v3MiningStatus.totalDistributed || '0') / (v3TotalRewards || 1)) * 100
-    : 0;
-
-  const currentTier = TIER_CONFIG[selectedTier];
-  const depositFeeRate = stakingData?.depositFeeConfig?.depositFee || 0;
-  const parsedDepositAmount = parseFloat(depositAmount || '0');
-  const estimatedDepositFee = parsedDepositAmount > 0 ? parsedDepositAmount * depositFeeRate / 100 : 0;
-  const estimatedPrincipal = parsedDepositAmount > 0 ? Math.max(parsedDepositAmount - estimatedDepositFee, 0) : 0;
-
-  // 推荐人信息
-  const hasReferrerBound = v3UserInfo?.referrer && v3UserInfo.referrer !== ethers.ZeroAddress;
-  const referralRates = stakingData?.referralRates || [];
+  const stats = [
+    { label: t('cz.node.statStaked'), value: miningStatus?.totalStaked || '0', suffix: 'CZ', icon: <FiLayers /> },
+    { label: t('cz.node.statDistributed'), value: miningStatus?.totalDistributed || '0', suffix: 'CZ', icon: <FiGift /> },
+    { label: t('cz.node.statNodeCount'), value: miningStatus?.rankedNodeCount || 0, suffix: t('cz.common.nodes'), icon: <FiUsers /> },
+    { label: t('cz.node.myRank'), value: userInfo ? (userInfo.rank ? `#${userInfo.rank}` : t('cz.node.noRank')) : '-', suffix: '', icon: <FiAward /> },
+  ];
 
   return (
     <div className="space-y-8">
-      {/* Page Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div className="flex items-center gap-4">
-          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-[#FFB800] to-[#FF8A00] flex items-center justify-center shadow-lg shadow-[#FFB800]/20">
-            <FiDollarSign className="w-7 h-7 text-[#0B1120]" />
-          </div>
-          <div>
-            <h1 className="text-2xl md:text-3xl font-bold text-white">{t('tokenMining.title')}</h1>
-            <p className="text-white/50">{t('tokenMining.subtitle')}</p>
-          </div>
-        </div>
-      </div>
-
-      {/* ============================================================ */}
-      {/* Staking bank */}
-      {/* ============================================================ */}
-      <div className="space-y-6">
-        <div className="flex items-center gap-3">
-          <span className="px-3 py-1 rounded-full text-xs font-medium bg-[#00D9A5]/20 text-[#00D9A5] border border-[#00D9A5]/30">
-            <FiActivity className="w-3 h-3 inline mr-1" />
-            {t('tokenMining.stakingBadge')}
-          </span>
-        </div>
-
-        {v3MiningStatus?.miningEnded && (
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="p-4 rounded-xl bg-[#FF6B6B]/10 border border-[#FF6B6B]/30"
-          >
-            <div className="flex items-start gap-3">
-              <FiAlertTriangle className="w-5 h-5 text-[#FF6B6B] mt-0.5 flex-shrink-0" />
+      <section className="grid lg:grid-cols-[1.1fr_0.9fr] gap-6 items-stretch">
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="neon-card">
+          <div className="neon-card-inner h-full">
+            <div className="flex items-center gap-4 mb-6">
+              <img src="/cz-logo.png" alt="CZ" className="w-16 h-16 rounded-full object-cover shadow-lg shadow-[#FFB800]/30" />
               <div>
-                <p className="text-[#FF6B6B] font-medium">{t('tokenMining.miningEndedTitle')}</p>
-                <p className="text-white/50 text-sm mt-1">{t('tokenMining.miningEndedDesc')}</p>
+                <h1 className="text-2xl md:text-4xl font-bold text-white">{t('cz.node.pageTitle')}</h1>
+                <p className="text-white/50 mt-1">{t('cz.node.pageSubtitle')}</p>
               </div>
             </div>
-          </motion.div>
-        )}
 
-        {/* Tier Selection Cards */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          {TIER_CONFIG.map((tier) => (
-            <motion.button
-              key={tier.id}
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-              onClick={() => setSelectedTier(tier.id)}
-              className={`relative p-3 sm:p-5 rounded-2xl border transition-all duration-300 text-left ${
-                selectedTier === tier.id
-                  ? 'bg-white/10 border-white/30 shadow-lg'
-                  : 'bg-white/5 border-white/10 hover:bg-white/8'
-              }`}
-              style={{
-                boxShadow: selectedTier === tier.id ? `0 0 30px ${tier.color}20` : 'none',
-              }}
-            >
-              {selectedTier === tier.id && (
-                <div className="absolute top-2 right-2 w-3 h-3 rounded-full" style={{ backgroundColor: tier.color }} />
-              )}
-              <div className="flex items-center gap-2 mb-3">
-                {tier.duration === 0 ? (
-                  <FiUnlock className="w-4 h-4" style={{ color: tier.color }} />
-                ) : (
-                  <FiLock className="w-4 h-4" style={{ color: tier.color }} />
-                )}
-                <span className="text-sm text-white/60">{tierNames[tier.id]}</span>
-              </div>
-              <div className="text-xl sm:text-2xl font-bold mb-1" style={{ color: tier.color }}>
-                {tier.apy}%
-              </div>
-              <div className="text-xs text-white/40">
-                {t('tokenMining.dailyRate')} {tier.rate}%
-              </div>
-              {tier.duration > 0 && (
-                <div className="text-xs text-white/30 mt-1">
-                  {t('tokenMining.lockDays')} {tier.duration} {t('tokenMining.days')}
+            <div className="grid sm:grid-cols-2 gap-3 mb-6">
+              {rankBands.map((band) => (
+                <div key={band.label} className="p-4 rounded-xl bg-white/5 border border-white/10">
+                  <div className="text-sm text-white/50">{band.label}</div>
+                  <div className="text-3xl font-bold mt-1" style={{ color: band.color }}>{band.percent}</div>
+                  <div className="text-xs text-white/35 mt-1">{t('cz.node.bandNote')}</div>
                 </div>
-              )}
-            </motion.button>
-          ))}
-        </div>
-
-        {/* Stats Grid */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          {[
-            { label: t('tokenMining.totalStaked'), value: v3MiningStatus?.totalStaked, suffix: 'NBT', icon: <FiLayers className="w-5 h-5" />, color: 'primary' },
-            { label: t('tokenMining.distributedRewards'), value: v3MiningStatus?.totalDistributed, suffix: 'NBT', icon: <FiGift className="w-5 h-5" />, color: 'gold' },
-            { label: t('tokenMining.remainingRewards'), value: v3MiningStatus?.remainingRewards, suffix: 'NBT', icon: <FiZap className="w-5 h-5" />, color: 'primary' },
-            { label: t('tokenMining.myPending'), value: v3PendingRewardAll, suffix: 'NBT', icon: <FiTrendingUp className="w-5 h-5" />, color: 'gold' },
-          ].map((stat, index) => (
-            <motion.div
-              key={stat.label}
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: index * 0.1 }}
-              className="stat-card-premium"
-            >
-              <div className={`flex items-center gap-2 mb-3 ${stat.color === 'primary' ? 'text-[#00D9A5]' : 'text-[#FFB800]'}`}>
-                {stat.icon}
-                <span className="text-white/40 text-sm">{stat.label}</span>
-              </div>
-              <div className="text-lg sm:text-2xl font-bold text-white">
-                {formatNumber(stat.value)}
-                <span className="text-white/40 text-xs sm:text-sm ml-1">{stat.suffix}</span>
-              </div>
-            </motion.div>
-          ))}
-        </div>
-
-        {/* Progress Bar + Sync Rewards */}
-        <div className="glass-premium p-5">
-          <div className="flex justify-between items-center mb-3">
-            <span className="text-white/60 text-sm">{t('tokenMining.rewardProgress')}</span>
-            <span className="text-sm font-medium text-[#FFB800]">{v3Progress.toFixed(2)}%</span>
-          </div>
-          <div className="progress-glow">
-            <motion.div
-              className="progress-glow-bar"
-              style={{ background: 'linear-gradient(90deg, #FFB800, #00D9A5)' }}
-              initial={{ width: 0 }}
-              animate={{ width: `${Math.min(v3Progress, 100)}%` }}
-              transition={{ duration: 1, ease: 'easeOut' }}
-            />
-          </div>
-          <div className="flex justify-between text-xs text-white/40 mt-2">
-            <span>0</span>
-            <span>{formatNumber(v3TotalRewards)} NBT</span>
-          </div>
-
-          {/* 公开同步奖励池按钮 - 任何人都可以点击 */}
-          {stakingData?.pendingSyncRewards && parseFloat(stakingData.pendingSyncRewards) > 0 && (
-            <div className="mt-4 p-4 rounded-xl bg-[#00D9A5]/10 border border-[#00D9A5]/30">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm text-white/70">{t('tokenMining.pendingSyncRewards') || '待同步奖励'}</div>
-                  <div className="text-lg font-bold text-[#00D9A5]">{formatNumber(stakingData.pendingSyncRewards, 4)} NBT</div>
-                  <div className="text-xs text-white/40 mt-1">{t('tokenMining.syncRewardsDesc') || '有人直接转账 NBT 到合约，点击同步即可计入奖励池'}</div>
-                </div>
-                <motion.button
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  onClick={handleSyncRewardsPublic}
-                  disabled={isSyncingRewards}
-                  className="px-6 py-3 rounded-xl bg-gradient-to-r from-[#00D9A5] to-[#00B88A] text-[#0B1120] font-medium hover:opacity-90 transition-opacity disabled:opacity-50 flex items-center gap-2 whitespace-nowrap"
-                >
-                  {isSyncingRewards ? (
-                    <>
-                      <div className="w-4 h-4 border-2 border-[#0B1120]/30 border-t-[#0B1120] rounded-full animate-spin" />
-                      {t('tokenMining.syncing') || '同步中...'}
-                    </>
-                  ) : (
-                    <>
-                      <FiRefreshCw className="w-4 h-4" />
-                      {t('tokenMining.syncRewards') || '同步奖励池'}
-                    </>
-                  )}
-                </motion.button>
-              </div>
+              ))}
             </div>
-          )}
-        </div>
 
-        {/* Main Cards: Staking + My Stakes */}
-        <div className="grid lg:grid-cols-2 gap-6">
-          {/* Staking Card */}
-          <motion.div initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} className="neon-card">
-            <div className="neon-card-inner">
-              <h2 className="text-xl font-bold mb-6 flex items-center gap-3">
-                <span className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: `${currentTier.color}20` }}>
-                  <FiDollarSign className="w-5 h-5" style={{ color: currentTier.color }} />
-                </span>
-                {t('tokenMining.stakeToken')} - {tierNames[selectedTier]}
-              </h2>
+            <div className="p-4 rounded-xl bg-[#FFB800]/10 border border-[#FFB800]/25 text-sm text-white/70">
+              <FiInfo className="inline mr-2 text-[#FFB800]" />
+              {t('cz.node.releaseHint')}
+            </div>
+          </div>
+        </motion.div>
 
-              {/* Selected Tier Info */}
-              <div className="p-4 rounded-xl mb-4 bg-white/5 border border-white/10">
-                <div className="flex justify-between items-center">
-                  <div>
-                    <div className="text-sm text-white/50">{t('tokenMining.selectedTier')}</div>
-                    <div className="text-lg font-bold" style={{ color: currentTier.color }}>{tierNames[selectedTier]}</div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-sm text-white/50">{t('tokenMining.annualYield')}</div>
-                    <div className="text-2xl font-bold text-white">{currentTier.apy}%</div>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="glass-premium p-5">
+          <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+            <FiDollarSign className="text-[#FFB800]" />
+            {t('cz.node.stakeTitle')}
+          </h2>
+
+          <div className="space-y-4">
+            {!hasReferrer ? (
+              hasAutoFilledReferrer && !showReferrerEdit ? (
+                <div className="rounded-xl border border-[#00D9A5]/30 bg-[#00D9A5]/10 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-xs text-[#00D9A5]">{t('cz.node.referrerAutoFilled')}</div>
+                      <div className="font-mono text-sm text-white truncate">{formatAddress(referrerInput)}</div>
+                      <div className="text-xs text-white/40 mt-1">链上未绑定，质押时将随交易一并绑定</div>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <button
+                        onClick={() => setShowReferrerEdit(true)}
+                        className="px-3 py-1.5 rounded-lg bg-white/10 text-xs text-white hover:bg-white/20"
+                      >
+                        {t('cz.node.referrerChange')}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setReferrerInput('');
+                          localStorage.removeItem('referrer');
+                          setShowReferrerEdit(false);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-white/10 text-xs text-white hover:bg-white/20"
+                      >
+                        {t('cz.node.referrerClear')}
+                      </button>
+                    </div>
                   </div>
                 </div>
-                {currentTier.duration > 0 && (
-                  <div className="mt-3 pt-3 border-t border-white/10 flex items-center gap-2 text-sm text-white/50">
-                    <FiClock className="w-4 h-4" />
-                    <span>{t('tokenMining.lockPeriod')} {currentTier.duration} {t('tokenMining.days')}{t('tokenMining.afterExpiry')}</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Balance */}
-              <div className="flex justify-between text-sm mb-3">
-                <span className="text-white/50">{t('tokenMining.availableBalance')}</span>
-                <span className="font-medium text-white">{formatNumber(tokenBalance, 4)} NBT</span>
-              </div>
-
-              {/* Input */}
-              <div className="relative mb-4">
+              ) : (
                 <input
-                  type="number"
-                  value={depositAmount}
-                  onChange={(e) => setDepositAmount(e.target.value)}
-                  placeholder={t('tokenMining.enterAmount')}
-                  className="input-premium pr-20"
+                  value={referrerInput}
+                  onChange={(e) => setReferrerInput(e.target.value)}
+                  placeholder={t('cz.node.referrerPlaceholder')}
+                  className="input-premium font-mono text-sm"
                 />
-                <button
-                  onClick={() => setDepositAmount(tokenBalance)}
-                  className="absolute right-4 top-1/2 -translate-y-1/2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
-                  style={{ backgroundColor: `${currentTier.color}20`, color: currentTier.color }}
-                >
-                  MAX
+              )
+            ) : (
+              <div className="rounded-xl border border-[#FFB800]/30 bg-[#FFB800]/10 p-3">
+                <div className="text-xs text-[#FFB800]">{t('cz.node.referrerBound')}</div>
+                <div className="font-mono text-sm text-white">{formatAddress(userInfo.referrer)}</div>
+              </div>
+            )}
+
+            <div>
+              <div className="flex justify-between text-sm mb-2">
+                <span className="text-white/50">{t('cz.node.stakeAmount')}</span>
+                <button className="text-[#FFB800]" onClick={() => setStakeAmount(tokenBalance || '0')}>
+                  {t('cz.node.all')} {formatNumber(tokenBalance, 4)} CZ
                 </button>
               </div>
+              <input
+                type="number"
+                value={stakeAmount}
+                onChange={(e) => setStakeAmount(e.target.value)}
+                placeholder={t('cz.node.amountPlaceholder')}
+                className="input-premium"
+              />
+            </div>
 
-              {/* Estimated Earnings */}
-              {depositAmount && parseFloat(depositAmount) > 0 && (
-                <div className="p-3 rounded-xl mb-4 text-sm bg-white/5 border border-white/5">
-                  {depositFeeRate > 0 && (
-                    <>
-                      <div className="flex justify-between mb-2">
-                        <span className="text-white/50">{t('tokenMining.depositFee')}</span>
-                        <span className="text-[#FFB800]">
-                          -{estimatedDepositFee.toFixed(4)} NBT ({depositFeeRate}%)
-                        </span>
-                      </div>
-                      <div className="flex justify-between mb-2">
-                        <span className="text-white/50">{t('tokenMining.actualPrincipal')}</span>
-                        <span className="text-white/70">{estimatedPrincipal.toFixed(4)} NBT</span>
-                      </div>
-                    </>
-                  )}
-                  <div className="flex justify-between mb-2">
-                    <span className="text-white/50">{t('tokenMining.estimatedDaily')}</span>
-                    <span className="font-medium" style={{ color: currentTier.color }}>
-                      +{(estimatedPrincipal * currentTier.rate / 100).toFixed(4)} NBT
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-white/50">{t('tokenMining.estimatedMonthly')}</span>
-                    <span className="text-white/70">
-                      +{(estimatedPrincipal * currentTier.rate / 100 * 30).toFixed(2)} NBT
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {/* Button */}
-              {!account ? (
-                <div className="text-center text-white/40 py-4 bg-white/5 rounded-xl border border-white/5">
-                  {t('tokenMining.pleaseConnect')}
-                </div>
-              ) : isCorrectNetwork === false ? (
-                <motion.button
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  onClick={onSwitchNetwork}
-                  className="w-full btn-premium"
-                  style={{ background: `linear-gradient(135deg, #FF6B6B, #FF6B6BCC)` }}
-                >
-                  <span>切换到 {NETWORK_NAME}</span>
-                </motion.button>
-              ) : needsApproval ? (
-                <motion.button
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  onClick={handleApprove}
-                  disabled={isApproving}
-                  className="w-full btn-premium disabled:opacity-50"
-                  style={{ background: `linear-gradient(135deg, ${currentTier.color}, ${currentTier.color}CC)` }}
-                >
-                  <span>{isApproving ? t('tokenMining.approving') : t('tokenMining.approveToken')}</span>
-                </motion.button>
-              ) : (
-                <motion.button
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  onClick={handleDeposit}
-                  disabled={isDepositing || !depositAmount || parseFloat(depositAmount) <= 0 || v3MiningStatus?.miningEnded}
-                  className="w-full btn-premium disabled:opacity-50"
-                  style={{ background: `linear-gradient(135deg, ${currentTier.color}, ${currentTier.color}CC)` }}
-                >
-                  <span>{isDepositing ? t('tokenMining.staking') : v3MiningStatus?.miningEnded ? t('tokenMining.miningEndedTitle') : `${t('tokenMining.stakeToken')} (${tierNames[selectedTier]})`}</span>
-                </motion.button>
-              )}
-
-              {/* Info */}
-              <div className="mt-4 p-4 rounded-xl bg-white/5 border border-white/5">
-                <div className="flex gap-3">
-                  <FiInfo className="text-[#00D9A5] mt-0.5 flex-shrink-0" />
-                  <div className="text-sm text-white/70">
-                    <p className="mb-2 font-medium text-white">{t('tokenMining.stakingRules')}</p>
-                    <ul className="list-disc list-inside space-y-1 text-white/50">
-                      <li>{t('tokenMining.rule1')}{TIER_CONFIG[0]?.rate || 0.4}%{t('tokenMining.rule1Desc')}</li>
-                      <li>{t('tokenMining.rule2')}{TIER_CONFIG[1]?.rate || 0.6}%{t('tokenMining.rule2Desc')}</li>
-                      <li>{t('tokenMining.rule3')}{TIER_CONFIG[2]?.rate || 0.8}%{t('tokenMining.rule3Desc')}</li>
-                      <li>{t('tokenMining.rule4')}{TIER_CONFIG[3]?.rate || 1.0}%{t('tokenMining.rule4Desc')}</li>
-                    </ul>
-                  </div>
-                </div>
+            <div className="grid grid-cols-1 gap-3 text-sm">
+              <div className="p-3 rounded-xl bg-white/5 border border-white/5">
+                <div className="text-white/40">{t('cz.node.inviteStakeReward')}</div>
+                <div className="text-[#00D9A5] font-semibold">{formatFullAmount('1000000')} CZ / {t('cz.common.person')}</div>
               </div>
-
-              {/* Slippage Warning */}
-              <div className="mt-4 p-4 rounded-xl bg-[#FFB800]/10 border border-[#FFB800]/30">
-                <div className="flex gap-3">
-                  <FiAlertTriangle className="text-[#FFB800] mt-0.5 flex-shrink-0" />
-                  <div className="text-sm">
-                    <p className="font-medium text-[#FFB800]">{t('tokenMining.slippageWarning')}</p>
-                    <p className="text-white/50 mt-1">
-                      {t('tokenMining.slippageDesc1')} <span className="text-[#FFB800] font-medium">2.8%</span> {t('tokenMining.slippageDesc2')}
-                    </p>
-                  </div>
-                </div>
+              <div className="p-3 rounded-xl bg-[#00D9A5]/10 border border-[#00D9A5]/20 text-white/70 leading-relaxed">
+                <div>质押15天，解锁后自由操作</div>
+                <div>点击复投，质押周期自动延续15天</div>
+                <div>排名权益持续生效，奖励自动累积</div>
+                <div>邀请人成功质押满 {formatNumber(minReferralStakeValue, 2)}U 价值代币，获得 {formatFullAmount('1000000')} CZ 奖励，质押到期后可领取</div>
               </div>
             </div>
-          </motion.div>
 
-          {/* My Stakes Card */}
-          <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="neon-card">
-            <div className="neon-card-inner">
-              <div className="flex justify-between items-center mb-6">
-                <h2 className="text-xl font-bold flex items-center gap-3">
-                  <span className="w-10 h-10 rounded-xl bg-[#00D9A5]/20 flex items-center justify-center">
-                    <FiGift className="w-5 h-5 text-[#00D9A5]" />
-                  </span>
-                  {t('tokenMining.myStakes')}
-                </h2>
-                {v3Stakes.length > 0 && parseFloat(v3PendingRewardAll) > 0 && (
-                  <motion.button
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
-                    onClick={handleClaimAll}
-                    disabled={isClaimingAll}
-                    className="px-4 py-2 rounded-lg bg-[#00D9A5]/20 text-[#00D9A5] text-sm font-medium hover:bg-[#00D9A5]/30 transition-colors disabled:opacity-50"
-                  >
-                    {isClaimingAll ? t('tokenMining.claiming') : t('tokenMining.claimAll')}
-                  </motion.button>
-                )}
-              </div>
+            {needsFeeApproval ? (
+              <button onClick={approveFeeToken} disabled={isApprovingFee || !account} className="w-full btn-premium disabled:opacity-50">
+                <span>{isApprovingFee ? t('cz.node.approving') : t('cz.node.approveFee')}</span>
+              </button>
+            ) : needsStakeApproval ? (
+              <button onClick={approveStakeToken} disabled={isApprovingStake || !account} className="w-full btn-premium disabled:opacity-50">
+                <span>{isApprovingStake ? t('cz.node.approving') : t('cz.node.approveStake')}</span>
+              </button>
+            ) : (
+              <button
+                onClick={handleStake}
+                disabled={isStaking || isCompounding || !account || !stakeAmount || activeRelease}
+                className="w-full btn-premium disabled:opacity-50"
+              >
+                <span>{activeRelease ? t('cz.node.monthlyAllocating') : isStaking ? t('cz.toast.staking') : t('cz.node.confirmStake')}</span>
+              </button>
+            )}
 
-              {/* Summary */}
-              <div className="grid grid-cols-2 gap-4 mb-6">
-                <div className="p-4 rounded-xl bg-white/5 border border-white/5">
-                  <div className="text-sm text-white/50 mb-1">{t('tokenMining.totalStakedUser')}</div>
-                  <div className="text-xl font-bold text-white">{formatNumber(v3UserInfo?.totalStaked, 4)} NBT</div>
-                </div>
-                <div className="p-4 rounded-xl bg-white/5 border border-white/5">
-                  <div className="text-sm text-white/50 mb-1">{t('tokenMining.totalEarned')}</div>
-                  <div className="text-xl font-bold text-[#00D9A5]">{formatNumber(v3UserInfo?.totalClaimed, 4)} NBT</div>
-                </div>
-              </div>
-
-              {/* V3 Stakes List */}
-              <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2">
-                {v3Stakes.length === 0 ? (
-                  <div className="text-center py-8 text-white/40">
-                    <FiLayers className="w-12 h-12 mx-auto mb-3 opacity-50" />
-                    <p>{t('tokenMining.noStakes')}</p>
-                    <p className="text-sm mt-1">{t('tokenMining.startStaking')}</p>
-                  </div>
-                ) : (
-                  v3Stakes.map((stake) => {
-                    const tierInfo = TIER_CONFIG[stake.tier];
-                    const isLocked = !canWithdraw(stake);
-                    return (
-                      <div key={stake.stakeId} className="p-4 rounded-xl bg-white/5 border border-white/10 hover:bg-white/8 transition-colors">
-                        <div className="flex justify-between items-start mb-3">
-                          <div className="flex items-center gap-2">
-                            {isLocked ? <FiLock className="w-4 h-4" style={{ color: tierInfo.color }} /> : <FiUnlock className="w-4 h-4" style={{ color: tierInfo.color }} />}
-                            <span className="font-medium" style={{ color: tierInfo.color }}>{tierNames[stake.tier]}</span>
-                            <span className="text-xs text-white/40">#{stake.stakeId}</span>
-                          </div>
-                          <div className="text-right">
-                            <div className="text-sm text-white/50">{t('tokenMining.dailyRate')}</div>
-                            <div className="font-medium" style={{ color: tierInfo.color }}>{tierInfo.rate}%</div>
-                          </div>
-                        </div>
-                        <div className="grid grid-cols-2 gap-4 mb-3">
-                          <div>
-                            <div className="text-xs text-white/40 mb-1">{t('tokenMining.stakeAmount')}</div>
-                            <div className="font-medium text-white">{formatNumber(stake.amount, 4)} NBT</div>
-                          </div>
-                          <div>
-                            <div className="text-xs text-white/40 mb-1">{t('tokenMining.myPending')}</div>
-                            <div className="font-medium text-[#00D9A5]">+{formatNumber(stake.pendingReward, 4)} NBT</div>
-                          </div>
-                        </div>
-                        {stake.tier > 0 && (
-                          <div className={`flex items-center gap-2 text-xs mb-3 ${isLocked ? 'text-[#FFB800]' : 'text-[#00D9A5]'}`}>
-                            <FiClock className="w-3 h-3" />
-                            <span>{isLocked ? `${t('tokenMining.remaining')} ${formatTimeRemaining(stake.unlockTime)}` : t('tokenMining.unlocked')}</span>
-                          </div>
-                        )}
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => handleClaim(stake.stakeId)}
-                            disabled={claimingStakeId === stake.stakeId || parseFloat(stake.pendingReward) <= 0}
-                            className="flex-1 py-2 rounded-lg bg-[#00D9A5]/20 text-[#00D9A5] text-sm font-medium hover:bg-[#00D9A5]/30 transition-colors disabled:opacity-50"
-                          >
-                            {claimingStakeId === stake.stakeId ? t('tokenMining.claiming') : t('tokenMining.claimReward')}
-                          </button>
-                          <button
-                            onClick={() => handleWithdraw(stake.stakeId)}
-                            disabled={withdrawingStakeId === stake.stakeId || isLocked}
-                            className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${
-                              isLocked ? 'bg-white/5 text-white/30 cursor-not-allowed' : 'bg-white/10 text-white/70 hover:bg-white/20'
-                            }`}
-                          >
-                            {withdrawingStakeId === stake.stakeId ? t('tokenMining.withdrawing') : isLocked ? t('tokenMining.inLockup') : t('tokenMining.withdrawPrincipal')}
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-          </motion.div>
-        </div>
-
-        {/* ============ 推荐系统区域 ============ */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="neon-card"
-        >
-          <div className="neon-card-inner">
-            <h2 className="text-xl font-bold mb-6 flex items-center gap-3">
-              <span className="w-10 h-10 rounded-xl bg-[#00D9A5]/20 flex items-center justify-center">
-                <FiUsers className="w-5 h-5 text-[#00D9A5]" />
-              </span>
-              {t('tokenMining.referralSection')}
-            </h2>
-
-            <div className="grid lg:grid-cols-2 gap-6">
-              {/* Left: Link + Referrer + Rates */}
-              <div className="space-y-4">
-                {/* Referral Link */}
-                {account && (
-                  <div className="p-4 rounded-xl bg-white/5 border border-white/10">
-                    <div className="text-sm text-white/50 mb-2">{t('tokenMining.myReferralLink')}</div>
-                    <div className="flex gap-2">
-                      <div className="flex-1 p-3 rounded-lg bg-white/5 border border-white/5 text-white/70 text-sm font-mono truncate">
-                        {`${window.location.origin}?ref=${formatAddress(account)}`}
-                      </div>
-                      <motion.button
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                        onClick={copyReferralLink}
-                        className={`px-4 py-3 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${
-                          copied
-                            ? 'bg-[#00D9A5] text-[#0B1120]'
-                            : 'bg-[#00D9A5]/20 text-[#00D9A5] hover:bg-[#00D9A5]/30'
-                        }`}
-                      >
-                        {copied ? <FiCheck className="w-4 h-4" /> : <FiCopy className="w-4 h-4" />}
-                        {copied ? t('tokenMining.copied') : t('tokenMining.copyLink')}
-                      </motion.button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Show Bound Referrer / Go to Referral Page */}
-                <div className="p-4 rounded-xl bg-white/5 border border-white/10">
-                  {hasReferrerBound ? (
-                    <div>
-                      <div className="text-sm text-white/50 mb-2">{t('tokenMining.referrerBound')}</div>
-                      <div className="p-3 rounded-lg bg-white/5 border border-white/5 font-mono text-white text-sm overflow-hidden">
-                        {formatAddress(v3UserInfo.referrer)}
-                      </div>
-                    </div>
-                  ) : (
-                    <div>
-                      <div className="text-sm text-white/50 mb-2">{t('tokenMining.setReferrer')}</div>
-                      <div className="p-3 rounded-lg bg-[#00D9A5]/5 border border-[#00D9A5]/10">
-                        <div className="flex gap-2 text-xs">
-                          <FiInfo className="w-3 h-3 text-[#00D9A5] mt-0.5 flex-shrink-0" />
-                          <span className="text-white/50">{t('tokenMining.referrerTipDesc')}</span>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Referral Rates */}
-                {referralRates.length > 0 && (
-                  <div className="p-4 rounded-xl bg-white/5 border border-white/10">
-                    <div className="text-sm text-white/50 mb-3">{t('tokenMining.referralRates')}</div>
-                    <div className="grid grid-cols-3 gap-2 sm:gap-3">
-                      {referralRates.map((rate, i) => (
-                        <div key={i} className="text-center p-3 rounded-lg bg-white/5 border border-white/5">
-                          <div className="text-xs text-white/40 mb-1">{i + 1}{t('tokenMining.level')}</div>
-                          <div className="text-lg font-bold text-[#00D9A5]">{rate}%</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Right: Stats + Claim + Team */}
-              <div className="space-y-4">
-                {/* Referral Stats */}
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="p-4 rounded-xl bg-white/5 border border-white/5">
-                    <div className="text-sm text-white/50 mb-1">{t('tokenMining.directReferrals')}</div>
-                    <div className="text-xl font-bold text-white">{v3UserInfo?.directReferrals || 0} {t('tokenMining.person')}</div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/5 border border-white/5">
-                    <div className="text-sm text-white/50 mb-1">{t('tokenMining.totalReferralClaimed')}</div>
-                    <div className="text-xl font-bold text-[#00D9A5]">{formatNumber(v3UserInfo?.totalReferralClaimed, 4)} NBT</div>
-                  </div>
-                </div>
-
-                {/* Pending Referral Reward + Claim */}
-                <div className="p-4 rounded-xl bg-white/5 border border-white/10">
-                  <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
-                    <div>
-                      <div className="text-sm text-white/50 mb-1">{t('tokenMining.pendingReferralReward')}</div>
-                      <div className="text-2xl font-bold text-[#FFB800]">{formatNumber(v3UserInfo?.referralRewards, 4)} NBT</div>
-                    </div>
-                    <motion.button
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={handleClaimReferral}
-                      disabled={isClaimingReferral || !v3UserInfo?.referralRewards || parseFloat(v3UserInfo?.referralRewards) <= 0}
-                      className="w-full sm:w-auto px-4 py-2 rounded-lg bg-[#FFB800]/20 text-[#FFB800] text-sm font-medium hover:bg-[#FFB800]/30 transition-colors disabled:opacity-50"
-                    >
-                      {isClaimingReferral ? t('tokenMining.claimingReferral') : t('tokenMining.claimReferralReward')}
-                    </motion.button>
-                  </div>
-                  <div className="text-xs text-white/40 mt-2">{t('tokenMining.referralRewardHint')}</div>
-                </div>
-
-                {/* Direct Referral List */}
-                <div className="p-4 rounded-xl bg-white/5 border border-white/10">
-                  <div className="text-sm text-white/50 mb-3">
-                    {t('tokenMining.myTeam')} ({stakingData?.referralsTotal || 0} {t('tokenMining.person')})
-                  </div>
-                  {allReferrals.length === 0 ? (
-                    <div className="text-center py-4 text-white/30 text-sm">
-                      {t('tokenMining.noTeamMembers')}
-                    </div>
-                  ) : (
-                    <div className="space-y-2 max-h-[200px] overflow-y-auto">
-                      {allReferrals.map((addr, i) => (
-                        <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-white/5 text-sm">
-                          <span className="text-white/40">#{i + 1}</span>
-                          <span className="font-mono text-white/70">{formatAddress(addr)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {allReferrals.length < (stakingData?.referralsTotal || 0) && (
-                    <button
-                      onClick={loadMoreReferrals}
-                      disabled={loadingMoreReferrals}
-                      className="w-full mt-3 py-2 rounded-lg bg-white/5 text-white/50 text-sm hover:bg-white/10 transition-colors disabled:opacity-50"
-                    >
-                      {loadingMoreReferrals ? '...' : t('tokenMining.loadMore')}
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
+            <button
+              onClick={handleCompoundAction}
+              disabled={!account || isApprovingFee || isApprovingStake || isCompounding || isClaiming || isStaking || activeRelease || !(reinvestTotal > 0) || !canCompoundRewards}
+              className="w-full btn-ghost border-[#FFB800]/50 bg-[#FFB800]/10 text-[#FFB800] hover:border-[#FFB800] hover:bg-[#FFB800]/20 hover:shadow-[0_0_30px_rgba(255,184,0,0.18)] disabled:opacity-50"
+            >
+              {!canCompoundRewards ? t('cz.node.compoundUnavailable') : activeRelease ? t('cz.node.monthlyAllocating') : isCompounding ? t('cz.node.compounding') : !(reinvestTotal > 0) ? t('cz.node.compoundRewards') : `${t('cz.node.compoundRewards')} ${formatNumber(reinvestTotal, 4)} CZ`}
+            </button>
           </div>
         </motion.div>
+      </section>
 
-        {/* Calculator Section */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="glass-premium overflow-hidden"
+      {manualCopyLink && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+          onClick={() => setManualCopyLink(null)}
         >
-          <button
-            onClick={() => setShowCalculator(!showCalculator)}
-            className="w-full p-5 flex items-center justify-between hover:bg-white/5 transition-colors"
+          <div
+            className="w-full max-w-md rounded-2xl bg-[#111827] border border-white/10 p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
           >
-            <span className="font-semibold flex items-center gap-2 text-white">
-              <FiTrendingUp className="w-5 h-5 text-[#FFB800]" />
-              {t('tokenMining.calculator')}
-            </span>
-            {showCalculator ? <FiChevronUp className="text-white/50" /> : <FiChevronDown className="text-white/50" />}
-          </button>
+            <h3 className="text-lg font-bold text-white mb-1">{t('cz.toast.manualCopyTitle')}</h3>
+            <p className="text-sm text-white/55 mb-4">{t('cz.toast.manualCopyHint')}</p>
+            <div
+              className="break-all rounded-xl bg-white/5 border border-white/10 p-3 text-[#00D9A5] text-sm font-mono select-all"
+              style={{ WebkitUserSelect: 'all', userSelect: 'all' }}
+            >
+              {manualCopyLink}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setManualCopyLink(null)}
+                className="px-4 py-2 rounded-lg bg-white/10 text-white hover:bg-white/20"
+              >
+                {t('cz.toast.manualCopyClose')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
-          {showCalculator && (
-            <div className="p-5 pt-0">
-              <div className="divider-glow mb-6" style={{ background: 'linear-gradient(90deg, transparent, rgba(255, 184, 0, 0.4), transparent)' }} />
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="text-white/50">
-                      <th className="text-left pb-3">{t('tokenMining.stakeAmount')}</th>
-                      {TIER_CONFIG.map((tier, idx) => (
-                        <th key={tier.id} className="text-center pb-3" style={{ color: tier.color }}>
-                          {tierNames[idx]}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="text-white">
-                    {[1000, 10000, 100000, 1000000].map(amount => (
-                      <tr key={amount} className="border-t border-white/5">
-                        <td className="py-3 text-white/70">{formatNumber(amount)} NBT</td>
-                        {TIER_CONFIG.map(tier => (
-                          <td key={tier.id} className="text-center py-3">
-                            <div style={{ color: tier.color }}>{t('tokenMining.daily')} +{formatNumber(amount * tier.rate / 100)}</div>
-                            <div className="text-xs text-white/40">{t('tokenMining.monthly')} +{formatNumber(amount * tier.rate / 100 * 30)}</div>
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+      <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {stats.map((stat) => (
+          <div key={stat.label} className="stat-card-premium">
+            <div className="flex items-center gap-2 text-[#FFB800] mb-3">
+              {stat.icon}
+              <span className="text-white/45 text-sm">{stat.label}</span>
+            </div>
+            <div className="text-xl sm:text-2xl font-bold text-white">
+              {typeof stat.value === 'string' && stat.value.startsWith('#') ? stat.value : formatNumber(stat.value, 4)}
+              {stat.suffix && <span className="text-white/40 text-sm ml-1">{stat.suffix}</span>}
+            </div>
+          </div>
+        ))}
+      </section>
+
+      <section className="grid lg:grid-cols-2 gap-6">
+        <div className="neon-card">
+          <div className="neon-card-inner">
+            <div className="flex items-center justify-between gap-3 mb-5">
+              <h2 className="text-xl font-bold flex items-center gap-2">
+                <FiZap className="text-[#00D9A5]" />
+                {t('cz.node.myRewards')}
+              </h2>
+              <button onClick={copyReferralLink} disabled={!account} className="px-4 py-2 rounded-lg bg-white/10 text-white/80 hover:bg-white/15 flex items-center gap-2">
+                {copied ? <FiCheck /> : <FiCopy />}
+                {copied ? t('cz.common.copied') : t('cz.common.copyLink')}
+              </button>
+            </div>
+
+            {pendingRewardsNumber > 0 && (
+              <div className="mb-5 p-3 rounded-xl bg-[#FF6B6B]/10 border border-[#FF6B6B]/40 flex items-center gap-2.5 animate-pulse">
+                <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#FF6B6B] opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#FF6B6B]" />
+                </span>
+                <span className="text-sm text-[#FF8A80] font-medium">
+                  {t('cz.node.claimableBanner').replace('{amount}', formatNumber(pendingRewardsAmount, 4))}
+                </span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-4 mb-5">
+              <div className="p-4 rounded-xl bg-white/5 border border-white/5">
+                <div className="text-white/45 text-sm">{t('cz.node.referralVolume')}</div>
+                <div className="text-2xl font-bold text-white">{formatNumber(userInfo?.referralStakeVolume, 4)} U</div>
+              </div>
+              <div className="p-4 rounded-xl bg-white/5 border border-white/5">
+                <div className="text-white/45 text-sm">{t('cz.node.directInvites')}</div>
+                <div className="text-2xl font-bold text-white">{userInfo?.directReferrals || 0} {t('cz.common.person')}</div>
+              </div>
+              <div className="p-4 rounded-xl bg-white/5 border border-white/5">
+                <div className="text-white/45 text-sm">{t('cz.node.invitePending')}</div>
+                <div className="text-2xl font-bold text-[#00D9A5]">{formatNumber(userInfo?.pendingInviteRewards, 4)} CZ</div>
+                {parseFloat(userInfo?.lockedInviteRewards || '0') > 0 && (
+                  <div className="text-xs text-white/35 mt-1">锁定中 {formatNumber(userInfo?.lockedInviteRewards, 4)} CZ，到期后可领取</div>
+                )}
+              </div>
+              <div className="p-4 rounded-xl bg-white/5 border border-white/5">
+                <div className="text-white/45 text-sm">{t('cz.node.rankPending')}</div>
+                <div className="text-2xl font-bold text-[#FFB800]">{formatNumber(userInfo?.pendingRankRewards, 4)} CZ</div>
+                <button
+                  onClick={handleClaimRank}
+                  disabled={!account || isClaimingRank || isCompounding || isClaiming || activeRelease || !(parseFloat(userInfo?.pendingRankRewards || '0') > 0)}
+                  className="mt-2 w-full px-3 py-1.5 rounded-lg bg-[#FFB800]/15 border border-[#FFB800]/30 text-[#FFB800] text-xs hover:bg-[#FFB800]/25 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {activeRelease ? '结算中，暂不可领取' : isClaimingRank ? '领取中…' : '领取排名分红'}
+                </button>
               </div>
             </div>
-          )}
-        </motion.div>
-      </div>
 
+            <button
+              onClick={needsFeeApproval ? approveFeeToken : handleClaim}
+              disabled={!account || isClaiming || isCompounding || (!needsFeeApproval && !(pendingRewardsNumber > 0))}
+              className={`w-full btn-premium disabled:opacity-50 ${pendingRewardsNumber > 0 && !needsFeeApproval ? 'ring-2 ring-[#FF6B6B]/60' : ''}`}
+            >
+              {pendingRewardsNumber > 0 && !needsFeeApproval && (
+                <span className="inline-flex items-center gap-2 mr-1">
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-white" />
+                  </span>
+                </span>
+              )}
+              <span>{needsFeeApproval ? t('cz.node.approveFeeFirst') : isClaiming ? t('cz.node.claiming') : t('cz.node.claimAll')}</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="glass-premium p-5">
+          <h2 className="text-xl font-bold flex items-center gap-2 text-white mb-5">
+            <FiTrendingUp className="text-[#FFB800]" />
+            {t('cz.node.leaderboard')}
+          </h2>
+          {userInfo && !userInfo.rank && (
+            <div className="mb-4 p-3 rounded-xl bg-[#FFB800]/10 border border-[#FFB800]/25 text-xs text-white/70 leading-relaxed">
+              {t('cz.node.rankHint')}
+            </div>
+          )}
+          <div className="space-y-2 max-h-[430px] overflow-y-auto pr-1">
+            {(stakingData?.rankedNodes || []).length === 0 ? (
+              <div className="text-center py-12 text-white/35">{t('cz.node.noRank')}</div>
+            ) : (
+              stakingData.rankedNodes.map((node) => {
+                const isMe = account && node.address.toLowerCase() === account.toLowerCase();
+                return (
+                  <div key={node.address} className={`flex items-center justify-between p-3 rounded-xl border ${isMe ? 'border-[#FFB800]/50 bg-[#FFB800]/10' : 'bg-white/5 border-white/5'}`}>
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className={`w-9 h-9 rounded-full flex items-center justify-center font-bold flex-shrink-0 ${node.rank <= 10 ? 'bg-[#FFB800] text-black' : 'bg-white/10 text-white/70'}`}>
+                        {node.rank}
+                      </div>
+                      <span className="font-mono text-white/75 truncate">{formatAddress(node.address)}</span>
+                      {isMe && <span className="text-[#FFB800] text-xs flex-shrink-0">{t('cz.common.me')}</span>}
+                      {isMe && pendingRewardsNumber > 0 && (
+                        <span className="px-1.5 py-0.5 rounded-full bg-[#FF6B6B] text-white text-[10px] font-semibold flex-shrink-0 animate-pulse">
+                          {t('cz.node.claimableBadge')}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-right">
+                      <div className="text-sm font-semibold text-white">{formatNumber(node.score, 4)} U</div>
+                      <div className="text-xs text-white/35">{t('cz.node.referralVolume')}</div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section className="neon-card">
+        <div className="neon-card-inner">
+          <h2 className="text-xl font-bold flex items-center gap-2 mb-5">
+            <FiLock className="text-[#00D9A5]" />
+            {t('cz.node.myStakes')}
+          </h2>
+          <div className="space-y-3">
+            {(stakingData?.stakes || []).length === 0 ? (
+              <div className="text-center py-8 text-white/35">{t('cz.node.noStakes')}</div>
+            ) : (
+              stakingData.stakes.map((stake) => (
+                <div key={stake.stakeId} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-xl bg-white/5 border border-white/10">
+                  <div>
+                    <div className="text-white font-semibold">{t('cz.node.stakeNo')} #{stake.stakeId + 1} · {formatNumber(stake.amount, 4)} CZ</div>
+                    <div className="text-xs text-white/35 mt-1">{t('cz.node.stakeValue')} {formatNumber(stake.scoreValue, 4)} U · {t('cz.node.startTime')} {formatDateTime(stake.startTime)}</div>
+                    <div className={`text-xs mt-1 ${stake.isUnlocked ? 'text-[#00D9A5]' : 'text-[#FFB800]'}`}>
+                      {stake.isUnlocked ? '已解锁，可自由操作' : `15天质押中，解锁时间 ${formatDateTime(stake.unlockTime)}`}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => needsFeeApproval ? approveFeeToken() : handleWithdraw(stake.stakeId)}
+                    disabled={withdrawingStakeId === stake.stakeId || activeRelease || !stake.isUnlocked}
+                    className="px-4 py-2 rounded-lg bg-white/10 text-white/75 hover:bg-white/15 disabled:opacity-50"
+                  >
+                    {activeRelease ? t('cz.node.cannotWithdraw') : !stake.isUnlocked ? '待解锁' : withdrawingStakeId === stake.stakeId ? t('cz.node.withdrawing') : needsFeeApproval ? t('cz.node.approveFeeBeforeWithdraw') : t('cz.node.withdrawPrincipal')}
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
