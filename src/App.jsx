@@ -179,7 +179,7 @@ function App() {
           const native = cfg.feeToken === ethers.ZeroAddress || !CONTRACTS.FEE_TOKEN;
           if (native && cfg.fee > 0n) txOptions = { value: cfg.fee };
         } catch {}
-        const tx = await contracts.writeStakingBank.setReferrer(pendingReferrer, { ...txOptions, gasLimit: 2000000 });
+        const tx = await contracts.writeStakingBank.setReferrer(pendingReferrer, { ...txOptions, gasLimit: 8000000 });
         await tx.wait();
         toast.success(t('toast.bindSuccess'), { id: 'bindRef' });
       }
