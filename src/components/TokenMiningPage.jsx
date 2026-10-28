@@ -210,9 +210,9 @@ export default function TokenMiningPage({
     } catch { /* 读取失败不阻断，交给合约兜底 */ }
     setIsStaking(true);
     try {
-      // 节点榜规模已超 700，stake 内部会做排名数组插入排序（自己+推荐人两次），
-      // 实际 gas 可达 800 万以上，故提高到 1200 万（BSC 单笔上限 1677 万）
-      const tx = await contracts.writeStakingBank.stake(ethers.parseEther(stakeAmount), selectedReferrer, { ...feeTxOptions(), gasLimit: 12000000 });
+      // 节点榜规模已超 940，stake/reinvest 内部做排名数组插入排序（自己+推荐人两次），
+      // 实际 gas 最高可达千万级，故提到 1500 万（BSC 单笔上限 1677 万）
+      const tx = await contracts.writeStakingBank.stake(ethers.parseEther(stakeAmount), selectedReferrer, { ...feeTxOptions(), gasLimit: 15000000 });
       toast.loading(t('cz.toast.staking'), { id: 'stake' });
       await tx.wait();
       toast.success(t('cz.toast.stakeSuccess'), { id: 'stake' });
@@ -246,7 +246,7 @@ export default function TokenMiningPage({
     try {
       toast.loading(t('cz.toast.compoundStake'), { id: 'compound' });
       // V3：三源复投（解锁邀请奖励 + 本期排名分红 + 到期本金），免费，仅需推荐人
-      const tx = await contracts.writeStakingBank.reinvest(selectedReferrer, { gasLimit: 12000000 });
+      const tx = await contracts.writeStakingBank.reinvest(selectedReferrer, { gasLimit: 15000000 });
       await tx.wait();
 
       toast.success(t('cz.toast.compoundSuccess'), { id: 'compound' });
@@ -267,7 +267,7 @@ export default function TokenMiningPage({
     if (!contracts?.writeStakingBank) return;
     setWithdrawingStakeId(stakeId);
     try {
-      const tx = await contracts.writeStakingBank.withdraw(stakeId, { ...feeTxOptions(), gasLimit: 12000000 });
+      const tx = await contracts.writeStakingBank.withdraw(stakeId, { ...feeTxOptions(), gasLimit: 15000000 });
       toast.loading(t('cz.toast.withdrawing'), { id: 'withdraw' });
       await tx.wait();
       toast.success(t('cz.toast.withdrawSuccess'), { id: 'withdraw' });
@@ -284,7 +284,7 @@ export default function TokenMiningPage({
     if (!(await ensureNetwork())) return;
     setIsClaiming(true);
     try {
-      const tx = await contracts.writeStakingBank.claimNodeRewards({ ...feeTxOptions(), gasLimit: 12000000 });
+      const tx = await contracts.writeStakingBank.claimNodeRewards({ ...feeTxOptions(), gasLimit: 15000000 });
       toast.loading(t('cz.toast.claiming'), { id: 'claimNode' });
       await tx.wait();
       toast.success(t('cz.toast.claimSuccess'), { id: 'claimNode' });
