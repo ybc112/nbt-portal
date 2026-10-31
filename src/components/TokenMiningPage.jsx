@@ -265,9 +265,36 @@ export default function TokenMiningPage({
 
   const handleWithdraw = async (stakeId) => {
     if (!contracts?.writeStakingBank) return;
+    if (!(await ensureNetwork())) return;
     setWithdrawingStakeId(stakeId);
     try {
-      const tx = await contracts.writeStakingBank.withdraw(stakeId, { ...feeTxOptions(), gasLimit: 15000000 });
+      // 节点榜已超 940，withdraw 需要重新排列节点数组，实际 gas 约 1200 万。
+      // 不能固定写死 1500 万：钱包会按 gasLimit × gasPrice 预扣 BNB，很多用户因此被拒。
+      // 改为动态估算 + 15% 余量，并把上限压到 1550 万。
+      let gasLimit = 15000000n;
+      try {
+        const est = await contracts.writeStakingBank.withdraw.estimateGas(stakeId, { ...feeTxOptions() });
+        const withBuffer = (est * 115n) / 100n;
+        gasLimit = withBuffer > 15500000n ? 15500000n : withBuffer;
+      } catch {
+        // 估算失败时沿用上限，交给合约兜底
+      }
+      // 显式压低 gasPrice（主网当前约 0.05 gwei，取 0.2 gwei 既可打包又能大幅降低预扣）
+      const gasPrice = ethers.parseUnits('0.2', 'gwei');
+      // 发送前校验 BNB 余额，不足时给出明确提示，避免钱包抛出「返回异常」
+      try {
+        const bal = await signer.provider.getBalance(account);
+        const feeValue = isNativeFee && parseFloat(effectiveFee || '0') > 0 ? ethers.parseEther(effectiveFee) : 0n;
+        const need = gasLimit * gasPrice + feeValue;
+        if (bal < need) {
+          toast.error(`钱包 BNB 不足：本笔约需 ${ethers.formatEther(need)} BNB，当前 ${ethers.formatEther(bal)} BNB，请先充值 BNB 再提取`);
+          setWithdrawingStakeId(null);
+          return;
+        }
+      } catch {
+        // 读取失败不阻断，交给合约兜底
+      }
+      const tx = await contracts.writeStakingBank.withdraw(stakeId, { ...feeTxOptions(), gasLimit, gasPrice });
       toast.loading(t('cz.toast.withdrawing'), { id: 'withdraw' });
       await tx.wait();
       toast.success(t('cz.toast.withdrawSuccess'), { id: 'withdraw' });
