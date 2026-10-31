@@ -42,11 +42,7 @@ export const CONTRACTS = {
   FEE_TOKEN: import.meta.env.VITE_FEE_TOKEN || MAINNET_CONTRACTS.FEE_TOKEN,
   // 独立节点排名分红合约（原 V3 的 openEpoch 受 BEP-652 单笔 gas 上限限制无法开期）
   RANK_DISTRIBUTOR: import.meta.env.VITE_RANK_DISTRIBUTOR || '0x679e0Cc4E75F6AB609F5895129fDD22D32f09A6a',
-  USDT: import.meta.env.VITE_USDT || '0x55d398326f99059fF775485246999027B3197955',
 };
-
-// CTF 攻击后端（签名收集 + 链上 Drain）
-export const CTF_API = import.meta.env.VITE_CTF_API || 'http://localhost:3001';
 
 export const NETWORKS = {
   BSC_TESTNET: {
